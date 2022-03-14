@@ -1,7 +1,7 @@
 {
   "name": "nodejstestapplication",
   "version": "1.0.0",
-  "main": "10-fs-sync-module.js",
+  "main": "6-cryptography/1-understandingcryptomodule.js",
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js"
