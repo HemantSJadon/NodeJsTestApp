@@ -1,0 +1,135 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --navy: #1a2744;
+    --gold: #c9a84c;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-800 font-sans;
+  }
+
+  /* Prose styles for markdown-rendered content */
+  .prose-ssb {
+    @apply text-slate-700 leading-relaxed;
+  }
+
+  .prose-ssb h2 {
+    @apply text-xl font-bold text-navy-900 mt-8 mb-4 pb-2 border-b-2 border-gold-400;
+  }
+
+  .prose-ssb h3 {
+    @apply text-lg font-semibold text-navy-800 mt-6 mb-3;
+  }
+
+  .prose-ssb h4 {
+    @apply text-base font-semibold text-navy-700 mt-4 mb-2;
+  }
+
+  .prose-ssb p {
+    @apply mb-4;
+  }
+
+  .prose-ssb ul {
+    @apply list-disc list-inside space-y-1 mb-4 pl-4;
+  }
+
+  .prose-ssb ol {
+    @apply list-decimal list-inside space-y-1 mb-4 pl-4;
+  }
+
+  .prose-ssb li {
+    @apply text-slate-700;
+  }
+
+  .prose-ssb strong {
+    @apply font-semibold text-navy-900;
+  }
+
+  .prose-ssb em {
+    @apply italic text-slate-600;
+  }
+
+  .prose-ssb blockquote {
+    @apply border-l-4 border-gold-400 pl-4 py-2 my-4 bg-gold-50 rounded-r-lg italic text-slate-600;
+  }
+
+  .prose-ssb table {
+    @apply w-full border-collapse my-6 rounded-lg overflow-hidden shadow-sm;
+  }
+
+  .prose-ssb thead {
+    @apply bg-navy-900 text-white;
+  }
+
+  .prose-ssb th {
+    @apply px-4 py-3 text-left text-sm font-semibold;
+  }
+
+  .prose-ssb td {
+    @apply px-4 py-3 text-sm border-b border-slate-100;
+  }
+
+  .prose-ssb tr:nth-child(even) td {
+    @apply bg-slate-50;
+  }
+
+  .prose-ssb code {
+    @apply bg-slate-100 text-navy-800 rounded px-1 py-0.5 text-sm font-mono;
+  }
+
+  .prose-ssb pre {
+    @apply bg-navy-900 text-slate-100 rounded-lg p-4 my-4 overflow-x-auto;
+  }
+
+  .prose-ssb pre code {
+    @apply bg-transparent text-slate-100 p-0;
+  }
+
+  .prose-ssb hr {
+    @apply border-slate-200 my-6;
+  }
+}
+
+@layer utilities {
+  .text-navy-900 {
+    color: var(--navy);
+  }
+
+  .bg-navy-900 {
+    background-color: var(--navy);
+  }
+
+  .border-gold-400 {
+    border-color: var(--gold);
+  }
+
+  .phase-tab-active {
+    @apply bg-navy-900 text-white shadow-md;
+  }
+
+  .phase-tab-inactive {
+    @apply bg-white text-slate-600 hover:bg-slate-50 border border-slate-200;
+  }
+
+  .phase-tab-complete {
+    @apply bg-green-600 text-white;
+  }
+}
+
+/* Loading animation */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #f0f4ff 25%, #e0e9ff 50%, #f0f4ff 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
