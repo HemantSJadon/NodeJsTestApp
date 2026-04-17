@@ -1,130 +1,106 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import type { Review, Message } from '@/types/game';
 
-let socket: Socket;
-function getSocket() {
-  if (!socket) socket = io({ transports: ['websocket', 'polling'] });
-  return socket;
+let _socket: Socket | null = null;
+function getSocket(): Socket {
+  if (!_socket || _socket.disconnected) _socket = io({ transports: ['websocket', 'polling'] });
+  return _socket;
 }
 
-const SCORE_COLORS = ['text-red-400', 'text-orange-400', 'text-amber-400', 'text-yellow-400', 'text-lime-400', 'text-green-400', 'text-emerald-400'];
 const PANEL_LABELS: Record<string, string> = {
-  collaborative: '🤝 Collaborative Panel',
-  competitive: '🏆 Competitive Panel',
-  hostile: '⚡ Hostile Panel',
-  mixed: '🎭 Mixed Panel',
+  collaborative: '🤝 Collaborative', competitive: '🏆 Competitive',
+  hostile: '⚡ Hostile', mixed: '🎭 Mixed',
 };
 
 function ScoreBar({ label, score }: { label: string; score: number }) {
-  const pct = (score / 10) * 100;
-  const color =
-    score >= 8 ? 'bg-emerald-500' : score >= 6 ? 'bg-indigo-500' : score >= 4 ? 'bg-amber-500' : 'bg-red-500';
-
+  const pct = ((score || 0) / 10) * 100;
+  const barColor = score >= 8 ? 'bg-emerald-500' : score >= 6 ? 'bg-indigo-500' : score >= 4 ? 'bg-amber-500' : 'bg-red-500';
+  const textColor = score >= 8 ? 'text-emerald-400' : score >= 6 ? 'text-indigo-400' : score >= 4 ? 'text-amber-400' : 'text-red-400';
   return (
     <div className="mb-2">
       <div className="flex justify-between text-xs mb-1">
         <span className="text-slate-400">{label}</span>
-        <span className={`font-bold ${SCORE_COLORS[Math.floor(score) - 1] || 'text-white'}`}>
-          {score}/10
-        </span>
+        <span className={`font-bold ${textColor}`}>{score}/10</span>
       </div>
       <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full score-bar ${color}`}
-          style={{ width: `${pct}%` }}
-        />
+        <div className={`h-full rounded-full score-bar ${barColor}`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
 }
 
-function ReviewCard({ review, isHighlighted }: { review: Review; isHighlighted: boolean }) {
-  const [expanded, setExpanded] = useState(isHighlighted);
-  const overallColor =
-    review.scores.overall >= 8
-      ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5'
-      : review.scores.overall >= 6
-      ? 'text-indigo-400 border-indigo-500/30 bg-indigo-500/5'
-      : review.scores.overall >= 4
-      ? 'text-amber-400 border-amber-500/30 bg-amber-500/5'
-      : 'text-red-400 border-red-500/30 bg-red-500/5';
+function ReviewCard({ review, rank, isHighlighted }: { review: Review; rank: number; isHighlighted: boolean }) {
+  const [open, setOpen] = useState(isHighlighted);
+  const overall = review.scores?.overall ?? 0;
+  const overallStyle = overall >= 8 ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/5' :
+    overall >= 6 ? 'text-indigo-400 border-indigo-500/30 bg-indigo-500/5' :
+    overall >= 4 ? 'text-amber-400 border-amber-500/30 bg-amber-500/5' :
+    'text-red-400 border-red-500/30 bg-red-500/5';
+  const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `#${rank}`;
 
   return (
-    <div
-      className={`glass-card border transition-all ${
-        isHighlighted ? 'border-cyan-500/40 ring-1 ring-cyan-500/20' : 'border-white/8'
-      }`}
-    >
-      <div
-        className="p-4 cursor-pointer flex items-center justify-between"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <div className="flex items-center gap-3">
-          <div
-            className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-base ${
-              review.isHuman ? 'bg-cyan-900/50 text-cyan-400 ring-1 ring-cyan-500/30' : 'bg-slate-700 text-white'
-            }`}
-          >
-            {review.isHuman ? '🎤' : review.candidateName.split(' ').map((w) => w[0]).join('').slice(0, 2)}
-          </div>
-          <div>
-            <div className="font-semibold text-white">
-              {review.candidateName}
-              {review.isHuman && <span className="ml-2 text-xs text-cyan-400">(You)</span>}
-            </div>
-            <div className="text-xs text-slate-500">{expanded ? 'Click to collapse' : 'Click to expand'}</div>
-          </div>
+    <div className={`glass-card transition-all ${isHighlighted ? 'border border-cyan-500/40 ring-1 ring-cyan-500/15' : 'border border-white/8'}`}>
+      <div className="p-4 cursor-pointer flex items-center gap-3" onClick={() => setOpen((v) => !v)}>
+        <div className="text-lg w-8 text-center shrink-0">{medal}</div>
+        <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm shrink-0 ${
+          review.isHuman ? 'bg-cyan-900/50 text-cyan-300 ring-1 ring-cyan-500/30' : 'bg-slate-700 text-white'}`}>
+          {review.isHuman ? '🎤' : review.candidateName.split(' ').map((w: string) => w[0]).join('').slice(0, 2)}
         </div>
-        <div className={`text-2xl font-bold px-3 py-1 rounded-lg border ${overallColor}`}>
-          {review.scores.overall}/10
+        <div className="flex-1 min-w-0">
+          <div className="font-semibold text-white text-sm">
+            {review.candidateName}
+            {review.isHuman && <span className="ml-1.5 text-xs text-cyan-400 font-normal">(You)</span>}
+          </div>
+          <div className="text-xs text-slate-500">{open ? 'Click to collapse' : 'Click to expand'}</div>
+        </div>
+        <div className={`text-xl font-bold px-3 py-1 rounded-lg border shrink-0 ${overallStyle}`}>
+          {overall}/10
         </div>
       </div>
 
-      {expanded && (
-        <div className="px-4 pb-4 border-t border-white/5 pt-4">
-          {/* Score bars */}
-          <div className="mb-4">
-            <ScoreBar label="Communication" score={review.scores.communication} />
-            <ScoreBar label="Content & Depth" score={review.scores.content} />
-            <ScoreBar label="Leadership" score={review.scores.leadership} />
-            <ScoreBar label="Listening" score={review.scores.listening} />
-            <ScoreBar label="Initiative" score={review.scores.initiative} />
+      {open && (
+        <div className="px-4 pb-4 border-t border-white/5 pt-4 space-y-4">
+          <div>
+            <ScoreBar label="Communication" score={review.scores?.communication ?? 0} />
+            <ScoreBar label="Content & Depth" score={review.scores?.content ?? 0} />
+            <ScoreBar label="Leadership" score={review.scores?.leadership ?? 0} />
+            <ScoreBar label="Listening" score={review.scores?.listening ?? 0} />
+            <ScoreBar label="Initiative" score={review.scores?.initiative ?? 0} />
           </div>
 
-          {/* Feedback */}
-          <div className="mb-4 p-3 bg-slate-800/50 rounded-lg border border-white/5">
-            <div className="text-xs text-slate-400 mb-1 font-medium uppercase tracking-wide">Panel Feedback</div>
-            <div className="text-sm text-slate-200 leading-relaxed">{review.feedback}</div>
+          <div className="p-3 bg-slate-800/50 rounded-lg border border-white/5">
+            <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1.5 font-medium">Panel Feedback</div>
+            <p className="text-sm text-slate-200 leading-relaxed">{review.feedback}</p>
           </div>
 
-          {/* Strengths & Improvements */}
+          {review.standoutMoment && (
+            <div className="p-3 bg-indigo-900/20 rounded-lg border border-indigo-500/15">
+              <div className="text-[10px] text-indigo-400 uppercase tracking-wider mb-1.5 font-medium">Standout Moment</div>
+              <p className="text-xs text-slate-300 leading-relaxed italic">"{review.standoutMoment}"</p>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <div className="text-xs text-emerald-400 font-medium mb-2 flex items-center gap-1">
-                ✓ Strengths
-              </div>
-              <ul className="space-y-1">
-                {review.strengths.map((s, i) => (
-                  <li key={i} className="text-xs text-slate-300 flex items-start gap-1.5">
-                    <span className="text-emerald-500 mt-0.5">•</span>
-                    {s}
+              <div className="text-xs text-emerald-400 font-medium mb-2">✓ Strengths</div>
+              <ul className="space-y-1.5">
+                {(review.strengths || []).map((s: string, i: number) => (
+                  <li key={i} className="text-xs text-slate-300 flex gap-1.5 leading-relaxed">
+                    <span className="text-emerald-500 shrink-0 mt-0.5">•</span>{s}
                   </li>
                 ))}
               </ul>
             </div>
             <div>
-              <div className="text-xs text-amber-400 font-medium mb-2 flex items-center gap-1">
-                ↑ Improvements
-              </div>
-              <ul className="space-y-1">
-                {review.improvements.map((s, i) => (
-                  <li key={i} className="text-xs text-slate-300 flex items-start gap-1.5">
-                    <span className="text-amber-500 mt-0.5">•</span>
-                    {s}
+              <div className="text-xs text-amber-400 font-medium mb-2">↑ Improve</div>
+              <ul className="space-y-1.5">
+                {(review.improvements || []).map((s: string, i: number) => (
+                  <li key={i} className="text-xs text-slate-300 flex gap-1.5 leading-relaxed">
+                    <span className="text-amber-500 shrink-0 mt-0.5">•</span>{s}
                   </li>
                 ))}
               </ul>
@@ -134,6 +110,11 @@ function ReviewCard({ review, isHighlighted }: { review: Review; isHighlighted: 
       )}
     </div>
   );
+}
+
+interface RoomInfo {
+  topic: string; panelType: string; humanName: string;
+  messages: Message[]; candidates: Array<{ id: string; name: string; speakingCount: number }>;
 }
 
 export default function ReviewPage() {
@@ -143,53 +124,74 @@ export default function ReviewPage() {
   const humanName = searchParams.get('name') || 'You';
 
   const [reviews, setReviews] = useState<Review[]>([]);
-  const [roomInfo, setRoomInfo] = useState<{
-    topic: string;
-    panelType: string;
-    humanName: string;
-    messages: Message[];
-  } | null>(null);
+  const [roomInfo, setRoomInfo] = useState<RoomInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'rankings' | 'transcript'>('rankings');
+  const [tab, setTab] = useState<'reviews' | 'transcript'>('reviews');
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchData = () => {
+    const s = getSocket();
+    s.emit('get-reviews', { roomId }, (res: {
+      reviews?: Review[]; room?: RoomInfo; error?: string;
+    }) => {
+      if (res.error) { setLoading(false); return; }
+      if (res.reviews && res.reviews.length > 0) {
+        setReviews(res.reviews);
+        if (res.room) setRoomInfo(res.room);
+        setLoading(false);
+        if (pollRef.current) clearInterval(pollRef.current);
+      }
+    });
+  };
 
   useEffect(() => {
     const s = getSocket();
 
-    const fetchData = () => {
-      s.emit('get-reviews', { roomId }, (res: {
-        reviews?: Review[];
-        room?: { topic: string; panelType: string; humanName: string; messages: Message[] };
-        error?: string;
-      }) => {
-        setLoading(false);
-        if (res.error) return;
-        if (res.reviews) setReviews(res.reviews);
-        if (res.room) setRoomInfo(res.room);
-      });
+    const start = () => {
+      fetchData();
+      // Auto-poll every 4 seconds until reviews arrive
+      pollRef.current = setInterval(fetchData, 4000);
     };
 
-    if (s.connected) {
-      fetchData();
-    } else {
-      s.on('connect', fetchData);
-    }
+    if (s.connected) start();
+    else s.once('connect', start);
 
     s.on('reviews-ready', ({ roomId: rid }: { roomId: string }) => {
       if (rid === roomId) fetchData();
     });
 
     return () => {
-      s.off('connect', fetchData);
+      s.off('connect', start);
       s.off('reviews-ready');
+      if (pollRef.current) clearInterval(pollRef.current);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
+
+  // Tie-aware ranking: sorted by overall desc; same score = same rank
+  const rankedReviews = useMemo(() => {
+    const sorted = [...reviews].sort((a, b) => (b.scores?.overall ?? 0) - (a.scores?.overall ?? 0));
+    let rank = 1;
+    return sorted.map((r, i) => {
+      if (i > 0 && (r.scores?.overall ?? 0) < (sorted[i - 1].scores?.overall ?? 0)) rank = i + 1;
+      return { review: r, rank };
+    });
+  }, [reviews]);
+
+  const humanReview = reviews.find((r) => r.isHuman);
+  const humanEntry = rankedReviews.find((e) => e.review.isHuman);
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-4xl mb-4 animate-pulse">⚙️</div>
-          <p className="text-slate-400">Loading reviews...</p>
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 p-4">
+        <div className="text-4xl animate-pulse">⚙️</div>
+        <p className="text-slate-300 font-medium">Generating evaluations…</p>
+        <p className="text-slate-500 text-sm">This takes about 20–30 seconds</p>
+        <div className="flex gap-1 mt-2">
+          {[0, 1, 2].map((i) => (
+            <span key={i} className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce"
+              style={{ animationDelay: `${i * 0.15}s` }} />
+          ))}
         </div>
       </div>
     );
@@ -197,139 +199,112 @@ export default function ReviewPage() {
 
   if (!reviews.length) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-4xl mb-4">⏳</div>
-          <p className="text-slate-400 mb-4">Reviews are still being generated...</p>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm"
-          >
-            Refresh
-          </button>
-        </div>
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4 p-4">
+        <div className="text-4xl">📭</div>
+        <p className="text-slate-400">No reviews found for this room.</p>
+        <button onClick={() => router.push('/')} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm">
+          Back to Home
+        </button>
       </div>
     );
   }
 
-  // Sort by overall score
-  const sorted = [...reviews].sort((a, b) => b.scores.overall - a.scores.overall);
-  const humanReview = reviews.find((r) => r.isHuman);
-  const humanRank = sorted.findIndex((r) => r.isHuman) + 1;
-
   return (
-    <div className="min-h-screen max-w-4xl mx-auto px-4 py-8">
-      {/* Header */}
-      <div className="mb-8">
-        <button onClick={() => router.push('/')} className="text-slate-400 hover:text-white text-sm mb-4 inline-block">
-          ← Back to Rooms
-        </button>
-        <div className="glass-card p-6">
-          <div className="flex items-start justify-between flex-wrap gap-4">
-            <div>
-              <div className="text-xs text-slate-500 mb-1">{PANEL_LABELS[roomInfo?.panelType || 'mixed'] || 'Group Discussion'}</div>
-              <h1 className="text-xl font-bold text-white mb-1">{roomInfo?.topic || 'Discussion Review'}</h1>
-              <div className="text-sm text-slate-400">{reviews.length} participants evaluated</div>
-            </div>
-            {humanReview && (
-              <div className="text-center">
-                <div className="text-xs text-slate-500 mb-1">Your Rank</div>
-                <div className="text-3xl font-bold text-white">
-                  #{humanRank}
-                  <span className="text-slate-500 text-lg font-normal"> / {reviews.length}</span>
-                </div>
-                <div className={`text-lg font-bold mt-1 ${
-                  humanReview.scores.overall >= 8 ? 'text-emerald-400' :
-                  humanReview.scores.overall >= 6 ? 'text-indigo-400' :
-                  humanReview.scores.overall >= 4 ? 'text-amber-400' : 'text-red-400'
-                }`}>
-                  {humanReview.scores.overall}/10 Overall
-                </div>
-              </div>
-            )}
+    <div className="min-h-screen max-w-3xl mx-auto px-4 py-8">
+      <button onClick={() => router.push('/')} className="text-slate-400 hover:text-white text-sm mb-5 inline-block">
+        ← New Discussion
+      </button>
+
+      {/* Header card */}
+      <div className="glass-card p-5 mb-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <div className="text-xs text-slate-500 mb-1">{PANEL_LABELS[roomInfo?.panelType || ''] || 'Group Discussion'}</div>
+            <h1 className="text-lg font-bold text-white mb-1 leading-snug">{roomInfo?.topic || 'Discussion'}</h1>
+            <div className="text-xs text-slate-500">{reviews.length} participants evaluated</div>
           </div>
+          {humanEntry && (
+            <div className="text-right shrink-0">
+              <div className="text-xs text-slate-500 mb-0.5">Your Rank</div>
+              <div className="text-3xl font-bold text-white leading-none">
+                #{humanEntry.rank}
+                <span className="text-slate-500 text-base font-normal"> / {reviews.length}</span>
+              </div>
+              <div className={`text-base font-bold mt-1 ${
+                (humanReview?.scores.overall ?? 0) >= 8 ? 'text-emerald-400' :
+                (humanReview?.scores.overall ?? 0) >= 6 ? 'text-indigo-400' :
+                (humanReview?.scores.overall ?? 0) >= 4 ? 'text-amber-400' : 'text-red-400'}`}>
+                {humanReview?.scores.overall ?? '—'}/10
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-2 mb-6">
-        <button
-          onClick={() => setActiveTab('rankings')}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-            activeTab === 'rankings' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          Individual Reviews
-        </button>
-        <button
-          onClick={() => setActiveTab('transcript')}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-            activeTab === 'transcript' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          Full Transcript
-        </button>
+      <div className="flex gap-2 mb-5">
+        {(['reviews', 'transcript'] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors capitalize ${
+              tab === t ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+            {t === 'reviews' ? 'Individual Reviews' : 'Full Transcript'}
+          </button>
+        ))}
       </div>
 
-      {activeTab === 'rankings' && (
-        <div className="space-y-4">
-          {/* Leaderboard quick view */}
+      {tab === 'reviews' && (
+        <div className="space-y-3">
+          {/* Mini leaderboard */}
           <div className="glass-card p-4 mb-2">
-            <div className="text-xs text-slate-400 mb-3 font-medium uppercase tracking-wide">Leaderboard</div>
+            <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-3 font-medium">Leaderboard</div>
             <div className="space-y-2">
-              {sorted.map((r, i) => (
-                <div key={r.candidateId} className="flex items-center gap-3">
-                  <div className={`w-6 text-sm font-bold ${i === 0 ? 'text-amber-400' : i === 1 ? 'text-slate-300' : i === 2 ? 'text-amber-700' : 'text-slate-500'}`}>
-                    #{i + 1}
+              {rankedReviews.map(({ review: r, rank: rk }) => (
+                <div key={r.candidateId} className="flex items-center gap-2">
+                  <div className={`text-sm w-6 text-center font-bold ${rk === 1 ? 'text-amber-400' : rk === 2 ? 'text-slate-300' : rk === 3 ? 'text-amber-700' : 'text-slate-500'}`}>
+                    #{rk}
                   </div>
-                  <div className="flex-1 text-sm text-white">
-                    {r.candidateName}
-                    {r.isHuman && <span className="ml-1 text-xs text-cyan-400">(You)</span>}
+                  <div className="flex-1 text-sm text-white truncate">
+                    {r.candidateName}{r.isHuman && <span className="ml-1 text-xs text-cyan-400">(You)</span>}
                   </div>
-                  <div className="flex gap-1">
-                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden" style={{ width: 80 }}>
-                      <div
-                        className={`h-full rounded-full ${r.scores.overall >= 8 ? 'bg-emerald-500' : r.scores.overall >= 6 ? 'bg-indigo-500' : 'bg-amber-500'}`}
-                        style={{ width: `${(r.scores.overall / 10) * 100}%` }}
-                      />
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${(r.scores?.overall ?? 0) >= 8 ? 'bg-emerald-500' : (r.scores?.overall ?? 0) >= 6 ? 'bg-indigo-500' : 'bg-amber-500'}`}
+                        style={{ width: `${((r.scores?.overall ?? 0) / 10) * 100}%` }} />
                     </div>
-                    <span className="text-xs font-bold text-slate-300 w-8 text-right">{r.scores.overall}</span>
+                    <span className="text-xs font-bold text-slate-300 w-6 text-right">{r.scores?.overall ?? '—'}</span>
                   </div>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Individual review cards — human first */}
+          {/* Cards — human first */}
           {[
-            ...(humanReview ? [humanReview] : []),
-            ...sorted.filter((r) => !r.isHuman),
-          ].map((review) => (
-            <ReviewCard key={review.candidateId} review={review} isHighlighted={review.isHuman} />
+            ...(humanEntry ? [humanEntry] : []),
+            ...rankedReviews.filter((e) => !e.review.isHuman),
+          ].map(({ review: r, rank: rk }) => (
+            <ReviewCard key={r.candidateId} review={r} rank={rk} isHighlighted={r.isHuman} />
           ))}
         </div>
       )}
 
-      {activeTab === 'transcript' && roomInfo?.messages && (
+      {tab === 'transcript' && roomInfo?.messages && (
         <div className="glass-card p-4">
-          <div className="space-y-3 max-h-[600px] overflow-y-auto transcript-scroll">
+          <div className="space-y-3 max-h-[560px] overflow-y-auto transcript-scroll pr-1">
             {roomInfo.messages.map((msg) => (
-              <div key={msg.id} className={`flex gap-3 text-sm ${msg.isHuman ? 'flex-row-reverse' : ''}`}>
-                <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
+              <div key={msg.id} className={`flex gap-2 text-sm ${msg.isHuman ? 'flex-row-reverse' : ''}`}>
+                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
                   msg.isModerator ? 'bg-slate-600 text-slate-200' :
-                  msg.isHuman ? 'bg-cyan-800 text-cyan-300' : 'bg-indigo-800 text-indigo-200'
-                }`}>
+                  msg.isHuman ? 'bg-cyan-800 text-cyan-300' : 'bg-indigo-800 text-indigo-200'}`}>
                   {msg.isModerator ? 'M' : msg.speakerName[0]}
                 </div>
-                <div className={`flex-1 ${msg.isHuman ? 'text-right' : ''}`}>
-                  <div className={`text-xs font-medium mb-0.5 ${
-                    msg.isModerator ? 'text-slate-400' : msg.isHuman ? 'text-cyan-400' : 'text-indigo-400'
-                  }`}>
+                <div className={`flex-1 ${msg.isHuman ? 'items-end' : ''} flex flex-col`}>
+                  <div className={`text-[10px] font-medium mb-0.5 ${msg.isHuman ? 'text-right' : ''} ${
+                    msg.isModerator ? 'text-slate-400' : msg.isHuman ? 'text-cyan-400' : 'text-indigo-400'}`}>
                     {msg.speakerName}
                   </div>
-                  <div className={`inline-block text-left px-3 py-2 rounded-lg text-slate-200 max-w-lg ${
-                    msg.isModerator ? 'bg-slate-700/60' : msg.isHuman ? 'bg-cyan-900/40' : 'bg-slate-800/70'
-                  }`}>
+                  <div className={`inline-block text-left px-3 py-2 rounded-lg text-slate-200 text-xs leading-relaxed max-w-sm ${
+                    msg.isModerator ? 'bg-slate-700/60' : msg.isHuman ? 'bg-cyan-900/40 self-end' : 'bg-slate-800/70'}`}>
                     {msg.text}
                   </div>
                 </div>
@@ -340,10 +315,8 @@ export default function ReviewPage() {
       )}
 
       <div className="mt-8 text-center">
-        <button
-          onClick={() => router.push('/')}
-          className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold transition-colors"
-        >
+        <button onClick={() => router.push('/')}
+          className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold transition-colors">
           Start Another Discussion
         </button>
       </div>

@@ -49,6 +49,7 @@ export interface Review {
   feedback: string;
   strengths: string[];
   improvements: string[];
+  standoutMoment?: string | null;
 }
 
 export interface Room {

@@ -7,40 +7,67 @@ export class GameManager {
     this.rooms = new Map();
     this.aiEngine = new AIEngine(apiKey);
     this.activeLoops = new Map();
+    // Client-driven timing: messageId → { resolve, timeoutId }
+    this.pendingCompletions = new Map();
   }
 
+  // ─── Public room helpers ───────────────────────────────────────────────────
+
   getRooms() {
-    return Array.from(this.rooms.values()).map((room) => ({
-      id: room.id,
-      topic: room.topic,
-      panelType: room.panelType,
-      phase: room.phase,
-      candidateCount: room.candidates.length,
-      createdAt: room.createdAt,
-      humanName: room.humanName,
-      discussionDuration: room.discussionDuration,
+    return Array.from(this.rooms.values()).map((r) => ({
+      id: r.id,
+      topic: r.topic,
+      panelType: r.panelType,
+      phase: r.phase,
+      candidateCount: r.candidates.length,
+      createdAt: r.createdAt,
+      humanName: r.humanName,
+      discussionDuration: r.discussionDuration,
     }));
   }
 
+  getRoomPublic(roomId) {
+    const r = this.rooms.get(roomId);
+    if (!r) return null;
+    return {
+      id: r.id,
+      topic: r.topic,
+      panelType: r.panelType,
+      phase: r.phase,
+      candidates: r.candidates,
+      messages: r.messages,
+      createdAt: r.createdAt,
+      discussionDuration: r.discussionDuration,
+      humanName: r.humanName,
+      reviews: r.reviews,
+    };
+  }
+
   createRoom({ topic, panelType = 'mixed', candidateCount = 5, discussionDuration = 10 }) {
-    const candidates = generateCandidates(
-      Math.min(Math.max(candidateCount, 3), 7),
-      panelType
-    );
+    const count = Math.min(Math.max(Math.round(candidateCount), 3), 7);
+    const duration = Math.min(Math.max(Math.round(discussionDuration), 3), 20);
+    const candidates = generateCandidates(count, panelType);
 
     const room = {
       id: uuidv4(),
-      topic,
+      topic: topic.trim(),
       panelType,
       phase: 'lobby',
       candidates,
       messages: [],
       createdAt: Date.now(),
-      discussionDuration: discussionDuration * 60 * 1000,
+      discussionDuration: duration * 60 * 1000,
       humanName: 'You',
       humanPaused: false,
       humanWaiting: false,
       reviews: null,
+      started: false,
+      // Per-candidate metrics for accurate review generation
+      metrics: {
+        totalTurns: 0,
+        humanTurns: 0,
+        humanWordCount: 0,
+      },
     };
 
     this.rooms.set(room.id, room);
@@ -52,191 +79,156 @@ export class GameManager {
   }
 
   setHumanName(roomId, name) {
-    const room = this.rooms.get(roomId);
-    if (room) room.humanName = name;
+    const r = this.rooms.get(roomId);
+    if (r && name) r.humanName = name;
   }
 
   addHumanSpeech(roomId, text) {
-    const room = this.rooms.get(roomId);
-    if (!room) return null;
+    const r = this.rooms.get(roomId);
+    if (!r || !text) return null;
 
-    const message = {
+    const wordCount = text.trim().split(/\s+/).length;
+    r.metrics.humanTurns++;
+    r.metrics.humanWordCount += wordCount;
+
+    const msg = {
       id: uuidv4(),
       speakerId: 'human',
-      speakerName: room.humanName,
-      text,
+      speakerName: r.humanName,
+      text: text.trim(),
       timestamp: Date.now(),
       isHuman: true,
       isModerator: false,
     };
-
-    room.messages.push(message);
-    room.humanPaused = false;
-    return message;
+    r.messages.push(msg);
+    r.humanPaused = false;
+    return msg;
   }
 
   pauseForHuman(roomId) {
-    const room = this.rooms.get(roomId);
-    if (room) {
-      room.humanPaused = true;
-    }
+    const r = this.rooms.get(roomId);
+    if (r) r.humanPaused = true;
   }
 
   resumeAfterHuman(roomId) {
-    const room = this.rooms.get(roomId);
-    if (room) {
-      room.humanPaused = false;
+    const r = this.rooms.get(roomId);
+    if (r) r.humanPaused = false;
+  }
+
+  humanClosingDone(roomId) {
+    const r = this.rooms.get(roomId);
+    if (r) r.humanWaiting = false;
+  }
+
+  // ─── Client-driven TTS timing ──────────────────────────────────────────────
+
+  // Called when client's browser TTS finishes playing a message
+  onUtteranceComplete(messageId) {
+    const pending = this.pendingCompletions.get(messageId);
+    if (pending) {
+      clearTimeout(pending.timeoutId);
+      this.pendingCompletions.delete(messageId);
+      pending.resolve();
     }
   }
+
+  // Wait for client to signal TTS done, with a generous fallback timeout
+  _waitForClientTTS(messageId, estimatedMs) {
+    return new Promise((resolve) => {
+      const fallback = Math.max(estimatedMs + 10000, 5000);
+      const timeoutId = setTimeout(() => {
+        this.pendingCompletions.delete(messageId);
+        resolve();
+      }, fallback);
+      this.pendingCompletions.set(messageId, { resolve, timeoutId });
+    });
+  }
+
+  // ─── Game orchestration ────────────────────────────────────────────────────
 
   async startGame(roomId, emit) {
     const room = this.rooms.get(roomId);
     if (!room) return;
+    if (room.started) return; // idempotency guard
+    room.started = true;
 
-    this.activeLoops.set(roomId, { running: true });
-    const loopState = this.activeLoops.get(roomId);
+    const loopState = { running: true };
+    this.activeLoops.set(roomId, loopState);
 
     try {
-      // Phase: intro
+      // Assign topic stances to candidates before anything starts
+      await this.aiEngine.assignStances(room);
+
+      // ── Phase: intro ──────────────────────────────────────────────────────
       room.phase = 'intro';
       emit('phase-change', { phase: 'intro' });
 
       const introText = await this.aiEngine.generateModeratorIntro(room);
-      const introMsg = this.addModeratorMessage(room, introText);
-      emit('ai-speaking', {
-        speakerId: 'moderator',
-        speakerName: 'Moderator',
-        text: introText,
-        isModerator: true,
-        voiceIndex: 0,
-        messageId: introMsg.id,
-      });
-      emit('message-added', introMsg);
-      await this.waitForSpeech(introText, room);
+      const introMsg = this._addModMsg(room, introText);
+      await this._emitAndWait(emit, room, 'moderator', introMsg, 0, loopState);
 
       if (!loopState.running) return;
 
-      // Phase: thinking
+      // ── Phase: thinking (2 min) ───────────────────────────────────────────
       room.phase = 'thinking';
-      const thinkDuration = 120000; // 2 minutes
+      const thinkDuration = 120_000;
       emit('phase-change', { phase: 'thinking', duration: thinkDuration });
-      await this.sleep(thinkDuration, room, loopState);
-
+      await this._interruptibleSleep(thinkDuration, room, loopState);
       if (!loopState.running) return;
 
-      // Phase: discussion
+      // ── Phase: discussion ─────────────────────────────────────────────────
       room.phase = 'discussion';
-      emit('phase-change', {
-        phase: 'discussion',
-        duration: room.discussionDuration,
-      });
+      emit('phase-change', { phase: 'discussion', duration: room.discussionDuration });
 
-      const startMsg = `Alright, your thinking time is up. Let's begin the group discussion. I'll remind you — stay on topic, be respectful, and ensure everyone gets a chance to speak. You have ${Math.round(room.discussionDuration / 60000)} minutes. Please begin.`;
-      const startMsgObj = this.addModeratorMessage(room, startMsg);
-      emit('ai-speaking', {
-        speakerId: 'moderator',
-        speakerName: 'Moderator',
-        text: startMsg,
-        isModerator: true,
-        voiceIndex: 0,
-        messageId: startMsgObj.id,
-      });
-      emit('message-added', startMsgObj);
-      await this.waitForSpeech(startMsg, room);
-
+      const kickoffText = `Alright, thinking time is up. Let's begin the group discussion. You have ${Math.round(room.discussionDuration / 60_000)} minutes. Please keep your contributions focused and respectful. The floor is open.`;
+      const kickoffMsg = this._addModMsg(room, kickoffText);
+      await this._emitAndWait(emit, room, 'moderator', kickoffMsg, 0, loopState);
       if (!loopState.running) return;
 
-      // Run the main discussion loop
-      await this.runDiscussionLoop(room, emit, loopState);
-
+      await this._runDiscussionLoop(room, emit, loopState);
       if (!loopState.running) return;
 
-      // Phase: closing
+      // ── Phase: closing ────────────────────────────────────────────────────
       room.phase = 'closing';
       emit('phase-change', { phase: 'closing' });
 
-      const closingIntro = `We're at the end of our time. I'll ask each participant, including our human candidate, to give one brief closing statement — your key takeaway or final position.`;
-      const closingIntroMsg = this.addModeratorMessage(room, closingIntro);
-      emit('ai-speaking', {
-        speakerId: 'moderator',
-        speakerName: 'Moderator',
-        text: closingIntro,
-        isModerator: true,
-        voiceIndex: 0,
-        messageId: closingIntroMsg.id,
-      });
-      emit('message-added', closingIntroMsg);
-      await this.waitForSpeech(closingIntro, room);
+      const closingIntro = `We're at time. I'd like a brief closing statement from each participant — one sentence capturing your core position. AI candidates first, then our human candidate.`;
+      const closingIntroMsg = this._addModMsg(room, closingIntro);
+      await this._emitAndWait(emit, room, 'moderator', closingIntroMsg, 0, loopState);
+      if (!loopState.running) return;
 
-      // AI candidates close
       for (const candidate of room.candidates) {
         if (!loopState.running) return;
-        const text = await this.aiEngine.generateClosingStatement(room, candidate);
-        const msg = {
-          id: uuidv4(),
-          speakerId: candidate.id,
-          speakerName: candidate.name,
-          text,
-          timestamp: Date.now(),
-          isHuman: false,
-          isModerator: false,
-        };
-        room.messages.push(msg);
-        candidate.speakingCount++;
-        emit('ai-speaking', {
-          speakerId: candidate.id,
-          speakerName: candidate.name,
-          text,
-          voiceIndex: candidate.voiceIndex,
-          messageId: msg.id,
-        });
-        emit('message-added', msg);
-        await this.waitForSpeech(text, room);
-        await this.sleep(600, room, loopState);
+        const text = await this._withRetry(() =>
+          this.aiEngine.generateClosingStatement(room, candidate)
+        );
+        const msg = this._addCandidateMsg(room, candidate, text);
+        await this._emitAndWait(emit, room, candidate.id, msg, candidate.voiceIndex, loopState);
+        await this._interruptibleSleep(400, room, loopState);
       }
 
-      // Prompt human for closing
-      const humanPrompt = await this.aiEngine.generateHumanClosingPrompt(room);
-      const humanPromptMsg = this.addModeratorMessage(room, humanPrompt);
-      emit('ai-speaking', {
-        speakerId: 'moderator',
-        speakerName: 'Moderator',
-        text: humanPrompt,
-        isModerator: true,
-        voiceIndex: 0,
-        messageId: humanPromptMsg.id,
-      });
-      emit('message-added', humanPromptMsg);
-      emit('human-closing-prompt', {});
-      await this.waitForSpeech(humanPrompt, room);
-
-      // Wait for human closing statement (up to 60s)
-      room.humanWaiting = true;
+      // Human closing
+      if (!loopState.running) return;
+      const humanPrompt = `${room.humanName}, finally — your closing statement please.`;
+      const humanPromptMsg = this._addModMsg(room, humanPrompt);
+      await this._emitAndWait(emit, room, 'moderator', humanPromptMsg, 0, loopState);
       emit('awaiting-human-closing', {});
+      room.humanWaiting = true;
+
       let waited = 0;
-      while (room.humanWaiting && waited < 60000 && loopState.running) {
-        await this.sleep(500, room, loopState);
+      while (room.humanWaiting && waited < 75_000 && loopState.running) {
+        await this._sleep(500);
         waited += 500;
       }
       room.humanWaiting = false;
 
       if (!loopState.running) return;
 
-      // Moderator sign-off
-      const signOff = `Thank you all for a stimulating discussion. That concludes today's group discussion. Your evaluations are being prepared now.`;
-      const signOffMsg = this.addModeratorMessage(room, signOff);
-      emit('ai-speaking', {
-        speakerId: 'moderator',
-        speakerName: 'Moderator',
-        text: signOff,
-        isModerator: true,
-        voiceIndex: 0,
-        messageId: signOffMsg.id,
-      });
-      emit('message-added', signOffMsg);
-      await this.waitForSpeech(signOff, room);
+      const signOff = `Thank you all for a substantive discussion. That concludes today's group discussion. Your performance evaluations are being prepared now.`;
+      const signOffMsg = this._addModMsg(room, signOff);
+      await this._emitAndWait(emit, room, 'moderator', signOffMsg, 0, loopState);
 
-      // Generate reviews
+      // ── Phase: generating reviews ─────────────────────────────────────────
       room.phase = 'generating-review';
       emit('phase-change', { phase: 'generating-review' });
 
@@ -246,153 +238,164 @@ export class GameManager {
       room.phase = 'review';
       emit('phase-change', { phase: 'review' });
       emit('reviews-ready', { reviews, roomId });
-    } catch (error) {
-      console.error('Game loop error:', error);
-      emit('game-error', { message: 'An error occurred. Please check your API key and try again.' });
+    } catch (err) {
+      console.error(`[Room ${roomId}] Game loop error:`, err);
+      emit('game-error', {
+        message: err.message?.includes('API key')
+          ? 'Invalid or missing Anthropic API key. Please check your server configuration.'
+          : 'An error occurred during the discussion. Please check the server logs.',
+      });
     } finally {
       loopState.running = false;
+      this.activeLoops.delete(roomId);
     }
   }
 
-  async runDiscussionLoop(room, emit, loopState) {
+  async _runDiscussionLoop(room, emit, loopState) {
     const endTime = Date.now() + room.discussionDuration;
     let turnCount = 0;
-    let consecutiveAITurns = 0;
+    let warnedAtEnd = false;
+
+    // Pre-generate first AI utterance immediately
+    let nextSpeaker = this._selectNextSpeaker(room, turnCount);
+    let nextGenPromise = this._withRetry(() =>
+      this.aiEngine.generateCandidateUtterance(room, nextSpeaker)
+    );
 
     while (Date.now() < endTime && loopState.running) {
-      // Wait if human is speaking
+      // Pause if human is speaking
       while (room.humanPaused && loopState.running) {
-        await this.sleep(300, room, loopState);
+        await this._sleep(200);
       }
-
       if (!loopState.running) return;
 
-      // Check remaining time
       const remaining = endTime - Date.now();
 
-      // Emit timer update
-      emit('timer-update', { remaining });
-
-      // If less than 45s remaining, give warning and end
-      if (remaining < 45000) {
-        const warnMsg = `We have under a minute remaining. Please wrap up your thoughts.`;
-        const warnMsgObj = this.addModeratorMessage(room, warnMsg);
-        emit('ai-speaking', {
-          speakerId: 'moderator',
-          speakerName: 'Moderator',
-          text: warnMsg,
-          isModerator: true,
-          voiceIndex: 0,
-          messageId: warnMsgObj.id,
-        });
-        emit('message-added', warnMsgObj);
-        await this.waitForSpeech(warnMsg, room);
-        // Wait out remaining time allowing human to speak
-        await this.sleep(remaining, room, loopState);
-        return;
+      // 45-second warning (once)
+      if (remaining < 45_000 && !warnedAtEnd) {
+        warnedAtEnd = true;
+        const warnText = `We have under a minute remaining. Please begin to wrap up.`;
+        const warnMsg = this._addModMsg(room, warnText);
+        await this._emitAndWait(emit, room, 'moderator', warnMsg, 0, loopState);
+        // Don't break — let remaining time play out for human to respond
       }
 
-      // Select next speaker (weighted random)
-      const candidate = this.selectNextSpeaker(room, turnCount);
-      turnCount++;
+      if (remaining <= 0) break;
 
-      // Occasionally check if moderator should intervene (every 5-8 turns)
-      if (turnCount % 6 === 0) {
-        const modComment = await this.aiEngine.generateModeratorIntervention(room);
-        if (modComment) {
-          const modMsg = this.addModeratorMessage(room, modComment);
-          emit('ai-speaking', {
-            speakerId: 'moderator',
-            speakerName: 'Moderator',
-            text: modComment,
-            isModerator: true,
-            voiceIndex: 0,
-            messageId: modMsg.id,
-          });
-          emit('message-added', modMsg);
-          await this.waitForSpeech(modComment, room);
-          await this.sleep(800, room, loopState);
-          consecutiveAITurns = 0;
+      // ── Moderator intervention check (every 5-7 turns) ──
+      if (turnCount > 0 && turnCount % (5 + Math.floor(Math.random() * 3)) === 0) {
+        const modText = await this._withRetry(
+          () => this.aiEngine.generateModeratorIntervention(room),
+          2
+        );
+        if (modText) {
+          const modMsg = this._addModMsg(room, modText);
+          await this._emitAndWait(emit, room, 'moderator', modMsg, 0, loopState);
+          await this._interruptibleSleep(600, room, loopState);
+
+          // After moderator, give human a window
+          emit('human-turn-opportunity', {});
+          await this._interruptibleSleep(4000, room, loopState);
+          if (room.humanPaused) {
+            while (room.humanPaused && loopState.running) await this._sleep(200);
+            if (!loopState.running) return;
+          }
           continue;
         }
       }
 
-      // Generate candidate utterance
+      // ── Get the pre-generated utterance ──
+      const currentSpeaker = nextSpeaker;
+      let text;
       try {
-        const text = await this.aiEngine.generateCandidateUtterance(room, candidate);
+        text = await nextGenPromise;
+      } catch (err) {
+        console.error('Pre-gen failed, skipping turn:', err.message);
+        // Advance to next speaker and re-pre-generate
+        turnCount++;
+        nextSpeaker = this._selectNextSpeaker(room, turnCount);
+        nextGenPromise = this._withRetry(() =>
+          this.aiEngine.generateCandidateUtterance(room, nextSpeaker)
+        );
+        await this._sleep(1000);
+        continue;
+      }
 
-        if (!loopState.running) return;
+      // ── Add message to room history FIRST (so next speaker selection sees it) ──
+      const msg = this._addCandidateMsg(room, currentSpeaker, text);
 
-        const msg = {
-          id: uuidv4(),
-          speakerId: candidate.id,
-          speakerName: candidate.name,
-          text,
-          timestamp: Date.now(),
-          isHuman: false,
-          isModerator: false,
-        };
-        room.messages.push(msg);
-        candidate.speakingCount++;
-        candidate.lastSpoke = Date.now();
+      // ── Immediately start generating the NEXT utterance in background ──
+      turnCount++;
+      room.metrics.totalTurns++;
+      nextSpeaker = this._selectNextSpeaker(room, turnCount);
+      nextGenPromise = this._withRetry(() =>
+        this.aiEngine.generateCandidateUtterance(room, nextSpeaker)
+      );
+      await this._emitAndWait(emit, room, currentSpeaker.id, msg, currentSpeaker.voiceIndex, loopState);
+      if (!loopState.running) return;
 
-        emit('ai-speaking', {
-          speakerId: candidate.id,
-          speakerName: candidate.name,
-          text,
-          voiceIndex: candidate.voiceIndex,
-          messageId: msg.id,
-        });
-        emit('message-added', msg);
+      // ── Natural pause between turns ──
+      const pauseMs = 700 + Math.random() * 1200;
+      await this._interruptibleSleep(pauseMs, room, loopState);
 
-        await this.waitForSpeech(text, room);
-
-        consecutiveAITurns++;
-
-        // After every 2-3 AI turns, pause briefly to let human speak
-        if (consecutiveAITurns >= 2 + Math.floor(Math.random() * 2)) {
-          emit('human-turn-opportunity', {});
-          await this.sleep(3500, room, loopState);
-          consecutiveAITurns = 0;
-        } else {
-          await this.sleep(900 + Math.random() * 1200, room, loopState);
+      // ── Periodic human opportunity (every 2-3 AI turns) ──
+      if (turnCount % (2 + Math.floor(Math.random() * 2)) === 0) {
+        emit('human-turn-opportunity', {});
+        await this._interruptibleSleep(3500, room, loopState);
+        if (room.humanPaused) {
+          while (room.humanPaused && loopState.running) await this._sleep(200);
         }
-      } catch (error) {
-        console.error('Utterance error:', error.message);
-        await this.sleep(2000, room, loopState);
       }
     }
   }
 
-  selectNextSpeaker(room, turnIndex) {
+  // ─── Speaker selection ────────────────────────────────────────────────────
+
+  _selectNextSpeaker(room, turnIndex) {
     const candidates = room.candidates;
-
-    // Weight by how long since last spoke
     const now = Date.now();
+
+    // Who just spoke? Never let same person speak twice in a row (unless only 1 candidate)
+    const lastMsg = room.messages.filter((m) => !m.isModerator && !m.isHuman).slice(-1)[0];
+    const justSpokeId = lastMsg?.speakerId;
+
     const weights = candidates.map((c) => {
-      const timeSince = now - (c.lastSpoke || 0);
-      const baseWeight = timeSince / 5000; // increases every 5 seconds of silence
+      // Hard-block consecutive same speaker (>1 candidate only)
+      if (candidates.length > 1 && c.id === justSpokeId) return 0.001;
 
-      // Quiet personality speaks less frequently
-      const personalityMod =
-        c.personality === 'quiet' ? 0.5 : c.personality === 'verbose' ? 1.3 : 1.0;
-      const assertiveMod = c.personality === 'assertive' ? 1.2 : 1.0;
+      // Base: time since last spoke (seconds), starting from a small baseline
+      const silenceSec = Math.max((now - (c.lastSpoke || now - 30_000)) / 1000, 1);
 
-      return Math.max(0.1, baseWeight * personalityMod * assertiveMod);
+      // Personality multiplier
+      const personalityMult = {
+        assertive: 1.4,
+        analytical: 1.1,
+        collaborative: 1.0,
+        devil_advocate: 1.2,
+        quiet: 0.55,
+        verbose: 1.25,
+      }[c.personality] ?? 1.0;
+
+      // Penalise if they just spoke in last 2 turns
+      const recentMessages = room.messages.slice(-4);
+      const spokenRecently = recentMessages.filter((m) => m.speakerId === c.id).length;
+      const recencyPenalty = spokenRecently > 1 ? 0.3 : spokenRecently === 1 ? 0.7 : 1.0;
+
+      return Math.max(0.05, silenceSec * 0.1 * personalityMult * recencyPenalty);
     });
 
-    const totalWeight = weights.reduce((a, b) => a + b, 0);
-    let rand = Math.random() * totalWeight;
-
+    const total = weights.reduce((a, b) => a + b, 0);
+    let rand = Math.random() * total;
     for (let i = 0; i < candidates.length; i++) {
       rand -= weights[i];
       if (rand <= 0) return candidates[i];
     }
-
     return candidates[turnIndex % candidates.length];
   }
 
-  addModeratorMessage(room, text) {
+  // ─── Message helpers ──────────────────────────────────────────────────────
+
+  _addModMsg(room, text) {
     const msg = {
       id: uuidv4(),
       speakerId: 'moderator',
@@ -406,33 +409,123 @@ export class GameManager {
     return msg;
   }
 
-  waitForSpeech(text, room) {
-    const words = text.trim().split(/\s+/).length;
-    const durationMs = Math.max((words / 140) * 60 * 1000, 1800);
-    return this.sleep(durationMs, room, null);
+  _addCandidateMsg(room, candidate, text) {
+    candidate.speakingCount = (candidate.speakingCount || 0) + 1;
+    candidate.totalWords = (candidate.totalWords || 0) + text.split(/\s+/).length;
+    candidate.lastSpoke = Date.now();
+
+    const msg = {
+      id: uuidv4(),
+      speakerId: candidate.id,
+      speakerName: candidate.name,
+      text,
+      timestamp: Date.now(),
+      isHuman: false,
+      isModerator: false,
+    };
+    room.messages.push(msg);
+    return msg;
   }
 
-  sleep(ms, room, loopState) {
-    return new Promise((resolve) => {
-      const interval = 50;
-      let elapsed = 0;
-      const timer = setInterval(() => {
-        elapsed += interval;
-        if (elapsed >= ms || (loopState && !loopState.running)) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, interval);
+  // ─── Emit + wait for client TTS completion ─────────────────────────────────
+
+  async _emitAndWait(emit, room, speakerId, msg, voiceIndex, loopState) {
+    const isModerator = msg.isModerator;
+    const estimatedMs = this._estimateSpeechMs(msg.text);
+
+    emit('ai-speaking', {
+      speakerId,
+      speakerName: msg.speakerName,
+      text: msg.text,
+      isModerator,
+      voiceIndex,
+      messageId: msg.id,
     });
+    emit('message-added', msg);
+
+    // Wait for client TTS completion signal (or timeout fallback)
+    await this._waitForClientTTS(msg.id, estimatedMs);
+
+    // Small buffer even after completion signal
+    if (loopState && loopState.running) {
+      await this._sleep(200);
+    }
   }
+
+  // ─── Timing utilities ─────────────────────────────────────────────────────
+
+  _estimateSpeechMs(text) {
+    const words = text.trim().split(/\s+/).length;
+    // Browser TTS default rate ≈ 160 WPM
+    return Math.max((words / 160) * 60_000, 1500);
+  }
+
+  _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Interruptible sleep: cancels cleanly when loop stops or human pauses
+  async _interruptibleSleep(ms, room, loopState) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (!loopState.running) return;
+      await this._sleep(Math.min(100, end - Date.now()));
+    }
+  }
+
+  // ─── Retry wrapper ────────────────────────────────────────────────────────
+
+  async _withRetry(fn, maxAttempts = 3) {
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (err.status === 401) throw err; // Auth errors — don't retry
+        const backoff = attempt * 1500;
+        console.warn(`Attempt ${attempt}/${maxAttempts} failed: ${err.message}. Retrying in ${backoff}ms…`);
+        await this._sleep(backoff);
+      }
+    }
+    throw lastErr;
+  }
+
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   stopGame(roomId) {
-    const loopState = this.activeLoops.get(roomId);
-    if (loopState) loopState.running = false;
+    const state = this.activeLoops.get(roomId);
+    if (state) state.running = false;
+
+    // Cancel any pending TTS completions for this room
+    const room = this.rooms.get(roomId);
+    if (room) {
+      for (const msg of room.messages) {
+        this.onUtteranceComplete(msg.id);
+      }
+    }
   }
 
-  humanClosingDone(roomId) {
-    const room = this.rooms.get(roomId);
-    if (room) room.humanWaiting = false;
+  stopAllGames() {
+    for (const [, state] of this.activeLoops) {
+      state.running = false;
+    }
+    for (const [, pending] of this.pendingCompletions) {
+      clearTimeout(pending.timeoutId);
+      pending.resolve();
+    }
+    this.pendingCompletions.clear();
+  }
+
+  cleanupOldRooms(maxAgeMs) {
+    const now = Date.now();
+    for (const [id, room] of this.rooms) {
+      const isOld = now - room.createdAt > maxAgeMs;
+      const isDone = room.phase === 'review' || room.phase === 'lobby';
+      if (isOld && isDone) {
+        this.stopGame(id);
+        this.rooms.delete(id);
+      }
+    }
   }
 }

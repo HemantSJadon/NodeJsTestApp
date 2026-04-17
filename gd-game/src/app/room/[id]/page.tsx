@@ -3,193 +3,147 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, useSearchParams, useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
-import type { Room, Message, Phase, Candidate } from '@/types/game';
+import type { Room, Message, Phase } from '@/types/game';
 
-let socket: Socket;
-function getSocket() {
-  if (!socket) socket = io({ transports: ['websocket', 'polling'] });
-  return socket;
+// One socket per browser tab — scoped to module, not window
+let _socket: Socket | null = null;
+function getSocket(): Socket {
+  if (!_socket || _socket.disconnected) {
+    _socket = io({ transports: ['websocket', 'polling'] });
+  }
+  return _socket;
 }
 
-// Positions for candidates in a circle layout (as % of container)
-function getCirclePositions(count: number) {
-  const positions = [];
-  // Moderator at top-center
-  positions.push({ x: 50, y: 8, label: 'moderator' });
+// ── Circle layout math ────────────────────────────────────────────────────────
+function getPositions(candidateCount: number) {
+  // Moderator top-center, Human bottom-center, candidates evenly spread in arc
+  const positions: Array<{ x: number; y: number; role: string }> = [];
+  positions.push({ x: 50, y: 10, role: 'moderator' });
 
-  // Candidates arranged in a semi-circle below
-  for (let i = 0; i < count; i++) {
-    const angle = Math.PI + (Math.PI * i) / (count - 1 || 1) - Math.PI;
-    const startAngle = -0.65 * Math.PI;
-    const endAngle = -0.35 * Math.PI;
-    const a = startAngle + ((endAngle - startAngle) * i) / Math.max(count - 1, 1);
-
-    // Spread candidates across the middle area
-    const radiusX = 40;
-    const radiusY = 30;
-    const cx = 50 + radiusX * Math.cos(a + Math.PI * 0.5);
-    const cy = 45 + radiusY * Math.sin(a + Math.PI * 0.5);
-    positions.push({ x: cx, y: cy });
+  if (candidateCount === 1) {
+    positions.push({ x: 50, y: 45, role: 'candidate' });
+  } else {
+    // Spread candidates in an arc from left-center to right-center
+    const startAngle = -0.72 * Math.PI;
+    const endAngle = -0.28 * Math.PI;
+    for (let i = 0; i < candidateCount; i++) {
+      const t = candidateCount === 1 ? 0.5 : i / (candidateCount - 1);
+      const angle = startAngle + t * (endAngle - startAngle);
+      const rx = 42, ry = 32, cx = 50, cy = 50;
+      positions.push({
+        x: cx + rx * Math.cos(angle),
+        y: cy + ry * Math.sin(angle),
+        role: 'candidate',
+      });
+    }
   }
-
-  // Human at bottom center
-  positions.push({ x: 50, y: 82, label: 'human' });
+  positions.push({ x: 50, y: 84, role: 'human' });
   return positions;
 }
 
+// ── Sub-components ────────────────────────────────────────────────────────────
 function WaveBars() {
   return (
-    <div className="flex items-end gap-0.5 h-5">
-      {[...Array(5)].map((_, i) => (
-        <span key={i} className="wave-bar" />
+    <div className="flex items-end gap-[2px] h-4">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <span key={i} className="wave-bar" style={{ animationDelay: `${i * 0.12}s` }} />
       ))}
     </div>
   );
 }
 
-function ThinkingDots() {
+function ThinkDots() {
   return (
-    <div className="thinking-dots flex gap-1">
+    <div className="thinking-dots flex gap-1 items-center">
       <span /><span /><span />
     </div>
   );
 }
 
-function CandidateAvatar({
-  name,
-  color,
-  isSpeaking,
-  isHuman,
-  isModerator,
-  speakingCount,
-  personality,
+function Avatar({
+  name, color, isSpeaking, isHuman, isModerator, personality,
 }: {
-  name: string;
-  color: string;
-  isSpeaking: boolean;
-  isHuman?: boolean;
-  isModerator?: boolean;
-  speakingCount?: number;
-  personality?: string;
+  name: string; color: string; isSpeaking: boolean;
+  isHuman?: boolean; isModerator?: boolean; personality?: string;
 }) {
-  const initials = name
-    .split(' ')
-    .map((w) => w[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
-
-  const borderColor = isModerator ? '#94A3B8' : isHuman ? '#22D3EE' : color;
+  const initials = name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  const ring = isModerator ? '#94A3B8' : isHuman ? '#22D3EE' : color;
 
   return (
-    <div className="flex flex-col items-center gap-1.5 select-none">
-      <div className="relative">
+    <div className="flex flex-col items-center gap-1 select-none pointer-events-none" style={{ width: 80 }}>
+      <div className="relative flex items-center justify-center">
         {isSpeaking && (
-          <div
-            className="absolute inset-0 rounded-full speaking-ring"
-            style={{ borderColor }}
+          <span
+            className="absolute inset-0 rounded-full animate-[speakingPulse_1.3s_ease-out_infinite]"
+            style={{ boxShadow: `0 0 0 0 ${ring}66` }}
           />
         )}
         <div
-          className={`w-14 h-14 rounded-full flex items-center justify-center text-white font-bold text-lg border-2 transition-all duration-200 ${isSpeaking ? 'scale-105' : ''}`}
+          className="w-14 h-14 rounded-full flex items-center justify-center font-bold text-lg border-2 transition-transform duration-150"
           style={{
-            backgroundColor: isModerator ? '#374151' : isHuman ? '#0E7490' : color,
-            borderColor: isSpeaking ? borderColor : 'transparent',
+            background: isModerator ? '#374151' : isHuman ? '#0E7490' : color,
+            borderColor: isSpeaking ? ring : 'transparent',
+            transform: isSpeaking ? 'scale(1.08)' : 'scale(1)',
           }}
         >
           {isModerator ? '🎓' : isHuman ? '🎤' : initials}
         </div>
         {isSpeaking && (
-          <div className="absolute -bottom-5 left-1/2 -translate-x-1/2">
+          <div className="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
             <WaveBars />
           </div>
         )}
       </div>
-      <div className="text-center mt-1" style={{ minWidth: 70 }}>
-        <div className="text-xs font-semibold text-white leading-tight">
+      <div className="text-center mt-1 px-1">
+        <div className="text-xs font-semibold text-white leading-tight truncate w-full">
           {isModerator ? 'Moderator' : name.split(' ')[0]}
         </div>
+        {isHuman && <div className="text-[10px] text-cyan-400">YOU</div>}
         {!isModerator && !isHuman && personality && (
-          <div className="text-[10px] text-slate-500 capitalize leading-tight">{personality.replace('_', ' ')}</div>
-        )}
-        {isHuman && (
-          <div className="text-[10px] text-cyan-400 leading-tight">YOU</div>
+          <div className="text-[10px] text-slate-500 capitalize leading-tight">
+            {personality.replace('_', ' ')}
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-function PhaseOverlay({ phase, thinkSeconds }: { phase: Phase; thinkSeconds: number }) {
-  if (phase === 'lobby') {
-    return (
-      <div className="absolute inset-0 bg-slate-900/90 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-10">
-        <div className="text-6xl mb-4">🎓</div>
-        <h2 className="text-2xl font-bold text-white mb-2">Ready to begin?</h2>
-        <p className="text-slate-400 mb-6 text-center max-w-xs">
-          The discussion will start once you click the button below. Ensure your microphone is ready.
-        </p>
-      </div>
-    );
-  }
-
-  if (phase === 'thinking') {
-    const m = Math.floor(thinkSeconds / 60);
-    const s = thinkSeconds % 60;
-    return (
-      <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-10">
-        <div className="text-5xl mb-4">🧠</div>
-        <h2 className="text-xl font-bold text-white mb-1">Think Time</h2>
-        <p className="text-slate-400 mb-4 text-sm">Jot down your thoughts before the discussion</p>
-        <div className="text-5xl font-mono font-bold text-indigo-400">
-          {m}:{s.toString().padStart(2, '0')}
-        </div>
-      </div>
-    );
-  }
-
-  if (phase === 'generating-review') {
-    return (
-      <div className="absolute inset-0 bg-slate-900/90 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-10">
-        <div className="text-5xl mb-4 animate-spin">⚙️</div>
-        <h2 className="text-xl font-bold text-white mb-2">Generating Reviews</h2>
-        <p className="text-slate-400 text-sm">Our AI panel is evaluating all participants...</p>
-      </div>
-    );
-  }
-
-  return null;
-}
-
+// ── Main page ─────────────────────────────────────────────────────────────────
 export default function RoomPage() {
   const { id: roomId } = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const router = useRouter();
-  const humanName = searchParams.get('name') || 'You';
+  const humanName = (searchParams.get('name') || 'You').slice(0, 50);
 
   const [room, setRoom] = useState<Room | null>(null);
   const [phase, setPhase] = useState<Phase>('lobby');
   const [messages, setMessages] = useState<Message[]>([]);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [isHumanSpeaking, setIsHumanSpeaking] = useState(false);
-  const [thinkSeconds, setThinkSeconds] = useState(120);
-  const [discussionRemaining, setDiscussionRemaining] = useState(0);
+  const [thinkSecs, setThinkSecs] = useState(120);
+  const [discRemaining, setDiscRemaining] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
-  const [humanOpportunity, setHumanOpportunity] = useState(false);
-  const [showTranscript, setShowTranscript] = useState(true);
   const [pttActive, setPttActive] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
+  const [humanOpportunity, setHumanOpportunity] = useState(false);
   const [humanClosingMode, setHumanClosingMode] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [notes, setNotes] = useState('');
+  const [textInput, setTextInput] = useState('');
+  const [showTranscript, setShowTranscript] = useState(true);
+  const [error, setError] = useState('');
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
-  const speakingQueueRef = useRef<boolean>(false);
-  const thinkTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const discussionTimerRef = useRef<NodeJS.Timeout | null>(null);
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const currentUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const currentMsgIdRef = useRef<string | null>(null);
+  const thinkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const discTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const oppTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const joinedRef = useRef(false); // prevent double-join
 
   // Auto-scroll transcript
   useEffect(() => {
@@ -198,143 +152,137 @@ export default function RoomPage() {
     }
   }, [messages]);
 
-  // Load voices
+  // Load TTS voices (async in some browsers)
   useEffect(() => {
     if (typeof window === 'undefined') return;
     synthRef.current = window.speechSynthesis;
 
     const loadVoices = () => {
-      voicesRef.current = window.speechSynthesis.getVoices().filter(
-        (v) => v.lang.startsWith('en')
-      );
+      const all = window.speechSynthesis.getVoices();
+      voicesRef.current = all.filter((v) => v.lang.startsWith('en'));
     };
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
 
-    if (!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
-      setSpeechSupported(false);
-    }
+    const SR = (window as typeof window & { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown })
+      .SpeechRecognition ?? (window as typeof window & { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
+    setSpeechSupported(!!SR);
+
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
   }, []);
 
-  const speakText = useCallback(
-    (text: string, voiceIndex: number, onDone?: () => void) => {
-      if (!synthRef.current) {
-        onDone?.();
-        return;
+  // Speak text and signal server when done
+  const speakText = useCallback((text: string, voiceIndex: number, messageId: string) => {
+    const synth = synthRef.current;
+    if (!synth) {
+      getSocket().emit('utterance-complete', { messageId });
+      return;
+    }
+    synth.cancel();
+
+    const utt = new SpeechSynthesisUtterance(text);
+    const voices = voicesRef.current;
+    if (voices.length > 0) {
+      utt.voice = voices[voiceIndex % voices.length];
+    }
+    utt.rate = 0.88 + (voiceIndex % 4) * 0.03;
+    utt.pitch = 0.9 + (voiceIndex % 3) * 0.12;
+
+    const done = () => {
+      if (currentMsgIdRef.current === messageId) {
+        currentMsgIdRef.current = null;
+        setSpeakingId(null);
+        setStatusText('');
+        getSocket().emit('utterance-complete', { messageId });
       }
+    };
+    utt.onend = done;
+    utt.onerror = done;
 
-      synthRef.current.cancel();
-
-      const utterance = new SpeechSynthesisUtterance(text);
-
-      // Assign different voices
-      const voices = voicesRef.current;
-      if (voices.length > 0) {
-        const idx = voiceIndex % voices.length;
-        utterance.voice = voices[idx];
-      }
-
-      utterance.rate = voiceIndex === 0 ? 0.92 : 0.88 + voiceIndex * 0.02;
-      utterance.pitch = 0.95 + (voiceIndex % 3) * 0.1;
-      utterance.volume = 1;
-
-      utterance.onend = () => {
-        speakingQueueRef.current = false;
-        onDone?.();
-      };
-      utterance.onerror = () => {
-        speakingQueueRef.current = false;
-        onDone?.();
-      };
-
-      speakingQueueRef.current = true;
-      synthRef.current.speak(utterance);
-    },
-    []
-  );
+    currentUtteranceRef.current = utt;
+    currentMsgIdRef.current = messageId;
+    synth.speak(utt);
+  }, []);
 
   const stopSpeaking = useCallback(() => {
     synthRef.current?.cancel();
-    speakingQueueRef.current = false;
+    if (currentMsgIdRef.current) {
+      getSocket().emit('utterance-complete', { messageId: currentMsgIdRef.current });
+      currentMsgIdRef.current = null;
+    }
+    setSpeakingId(null);
+    setStatusText('');
   }, []);
 
-  // Socket setup
+  // Socket setup — single join, proper cleanup
   useEffect(() => {
     const s = getSocket();
 
-    s.on('connect', () => {
+    const joinRoom = () => {
+      if (joinedRef.current) return;
+      joinedRef.current = true;
       s.emit('join-room', { roomId, humanName }, (res: { room?: Room; error?: string }) => {
-        if (res.error) {
-          alert(res.error);
-          router.push('/');
-          return;
-        }
+        if (res.error) { setError(res.error); return; }
         if (res.room) {
           setRoom(res.room);
           setPhase(res.room.phase);
           setMessages(res.room.messages || []);
         }
       });
-    });
+    };
 
-    s.emit('join-room', { roomId, humanName }, (res: { room?: Room; error?: string }) => {
-      if (res.error) { router.push('/'); return; }
-      if (res.room) {
-        setRoom(res.room);
-        setPhase(res.room.phase);
-        setMessages(res.room.messages || []);
-      }
-    });
+    if (s.connected) {
+      joinRoom();
+    } else {
+      s.once('connect', joinRoom);
+    }
 
-    s.on('phase-change', ({ phase: newPhase, duration }: { phase: Phase; duration?: number }) => {
-      setPhase(newPhase);
+    s.on('phase-change', ({ phase: p, duration }: { phase: Phase; duration?: number }) => {
+      setPhase(p);
 
-      if (newPhase === 'thinking' && duration) {
-        setThinkSeconds(Math.floor(duration / 1000));
+      if (p === 'thinking' && duration) {
+        setThinkSecs(Math.floor(duration / 1000));
+        if (thinkTimerRef.current) clearInterval(thinkTimerRef.current);
         thinkTimerRef.current = setInterval(() => {
-          setThinkSeconds((prev) => {
-            if (prev <= 1) {
-              clearInterval(thinkTimerRef.current!);
-              return 0;
-            }
+          setThinkSecs((prev) => {
+            if (prev <= 1) { clearInterval(thinkTimerRef.current!); return 0; }
             return prev - 1;
           });
         }, 1000);
       }
 
-      if (newPhase === 'discussion' && duration) {
-        setDiscussionRemaining(duration);
-        discussionTimerRef.current = setInterval(() => {
-          setDiscussionRemaining((prev) => Math.max(0, prev - 1000));
+      if (p === 'discussion' && duration) {
+        setDiscRemaining(duration);
+        if (discTimerRef.current) clearInterval(discTimerRef.current);
+        discTimerRef.current = setInterval(() => {
+          setDiscRemaining((prev) => Math.max(0, prev - 1000));
         }, 1000);
       }
 
-      if (newPhase === 'review') {
-        clearInterval(discussionTimerRef.current!);
+      if (p === 'review' || p === 'generating-review') {
+        if (discTimerRef.current) clearInterval(discTimerRef.current);
       }
     });
 
-    s.on('ai-speaking', ({ speakerId, speakerName, text, isModerator, voiceIndex, messageId }: {
-      speakerId: string; speakerName: string; text: string; isModerator?: boolean; voiceIndex: number; messageId: string;
+    s.on('ai-speaking', ({ speakerId, speakerName, text, voiceIndex, messageId }: {
+      speakerId: string; speakerName: string; text: string;
+      voiceIndex: number; messageId: string; isModerator?: boolean;
     }) => {
       setSpeakingId(speakerId);
-      setStatusText(`${speakerName} is speaking...`);
-      speakText(text, voiceIndex, () => {
-        setSpeakingId(null);
-        setStatusText('');
-      });
+      setStatusText(`${speakerName} is speaking…`);
+      speakText(text, voiceIndex, messageId);
     });
 
     s.on('message-added', (msg: Message) => {
-      setMessages((prev) => {
-        if (prev.find((m) => m.id === msg.id)) return prev;
-        return [...prev, msg];
-      });
+      setMessages((prev) => prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]);
     });
 
     s.on('human-turn-opportunity', () => {
       setHumanOpportunity(true);
-      setTimeout(() => setHumanOpportunity(false), 4000);
+      if (oppTimeoutRef.current) clearTimeout(oppTimeoutRef.current);
+      oppTimeoutRef.current = setTimeout(() => setHumanOpportunity(false), 4500);
     });
 
     s.on('awaiting-human-closing', () => {
@@ -342,16 +290,19 @@ export default function RoomPage() {
       setStatusText('Your turn — give your closing statement');
     });
 
-    s.on('human-speaking', () => {
-      stopSpeaking();
-    });
+    s.on('human-speaking', () => stopSpeaking());
+    s.on('human-done', () => {});
 
     s.on('reviews-ready', ({ roomId: rid }: { roomId: string }) => {
-      setTimeout(() => router.push(`/review/${rid}?name=${encodeURIComponent(humanName)}`), 1500);
+      setTimeout(() => {
+        router.push(`/review/${rid}?name=${encodeURIComponent(humanName)}`);
+      }, 1200);
     });
 
     s.on('game-error', ({ message }: { message: string }) => {
-      alert(message);
+      setError(message);
+      setPhase('lobby');
+      setGameStarted(false);
     });
 
     return () => {
@@ -361,52 +312,61 @@ export default function RoomPage() {
       s.off('human-turn-opportunity');
       s.off('awaiting-human-closing');
       s.off('human-speaking');
+      s.off('human-done');
       s.off('reviews-ready');
       s.off('game-error');
-      clearInterval(thinkTimerRef.current!);
-      clearInterval(discussionTimerRef.current!);
+      s.off('connect', joinRoom);
+
+      if (thinkTimerRef.current) clearInterval(thinkTimerRef.current);
+      if (discTimerRef.current) clearInterval(discTimerRef.current);
+      if (oppTimeoutRef.current) clearTimeout(oppTimeoutRef.current);
+
+      stopSpeaking();
+      s.emit('leave-room', { roomId });
     };
   }, [roomId, humanName, router, speakText, stopSpeaking]);
 
   const handleStartGame = () => {
     if (gameStarted) return;
     setGameStarted(true);
+    setError('');
     getSocket().emit('start-game', { roomId });
     setPhase('intro');
   };
 
-  // Push-to-talk handlers
+  // Push-to-talk
   const startPTT = useCallback(() => {
-    if (!speechSupported || pttActive) return;
+    if (pttActive) return;
+    const SR = (window as typeof window & { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown })
+      .SpeechRecognition ?? (window as typeof window & { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
+    if (!SR) return;
+
     stopSpeaking();
     setPttActive(true);
     setIsHumanSpeaking(true);
     setHumanOpportunity(false);
     getSocket().emit('human-interrupt', { roomId });
 
-    const SR = (window.SpeechRecognition || (window as any).webkitSpeechRecognition) as typeof SpeechRecognition;
-    recognitionRef.current = new SR();
-    recognitionRef.current.lang = 'en-IN';
-    recognitionRef.current.interimResults = true;
-    recognitionRef.current.continuous = false;
+    let finalText = '';
+    const rec = new (SR as new () => SpeechRecognition)();
+    rec.lang = 'en-IN';
+    rec.interimResults = true;
+    rec.continuous = false;
+    recognitionRef.current = rec;
 
-    let finalTranscript = '';
-
-    recognitionRef.current.onresult = (event) => {
+    rec.onresult = (e: SpeechRecognitionEvent) => {
       let interim = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript + ' ';
-        } else {
-          interim += event.results[i][0].transcript;
-        }
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript + ' ';
+        else interim += e.results[i][0].transcript;
       }
-      setStatusText(`Listening: ${finalTranscript}${interim}`);
+      setStatusText(`🎤 ${finalText}${interim}`);
     };
 
-    recognitionRef.current.onend = () => {
-      if (finalTranscript.trim()) {
-        getSocket().emit('human-speech', { roomId, text: finalTranscript.trim() });
+    const finish = () => {
+      const text = finalText.trim();
+      if (text) {
+        getSocket().emit('human-speech', { roomId, text });
         if (humanClosingMode) {
           getSocket().emit('human-closing-done', { roomId });
           setHumanClosingMode(false);
@@ -418,25 +378,19 @@ export default function RoomPage() {
       setStatusText('');
     };
 
-    recognitionRef.current.onerror = () => {
-      setPttActive(false);
-      setIsHumanSpeaking(false);
-      setStatusText('');
-      getSocket().emit('human-done-speaking', { roomId });
-    };
-
-    recognitionRef.current.start();
-  }, [speechSupported, pttActive, stopSpeaking, roomId, humanClosingMode]);
+    rec.onend = finish;
+    rec.onerror = finish;
+    rec.start();
+  }, [pttActive, stopSpeaking, roomId, humanClosingMode]);
 
   const stopPTT = useCallback(() => {
     recognitionRef.current?.stop();
   }, []);
 
-  // Text fallback for non-speech
-  const [textInput, setTextInput] = useState('');
-  const submitTextInput = () => {
-    if (!textInput.trim()) return;
-    getSocket().emit('human-speech', { roomId, text: textInput.trim() });
+  const submitText = () => {
+    const text = textInput.trim();
+    if (!text) return;
+    getSocket().emit('human-speech', { roomId, text });
     if (humanClosingMode) {
       getSocket().emit('human-closing-done', { roomId });
       setHumanClosingMode(false);
@@ -446,269 +400,229 @@ export default function RoomPage() {
     setStatusText('');
   };
 
-  const formatTime = (ms: number) => {
+  const fmtTime = (ms: number) => {
     const m = Math.floor(ms / 60000);
     const s = Math.floor((ms % 60000) / 1000);
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  if (!room) {
+  if (error && !room) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-slate-400">Joining room...</div>
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="glass-card p-8 max-w-md w-full text-center">
+          <div className="text-4xl mb-4">⚠️</div>
+          <h2 className="text-xl font-bold text-white mb-2">Unable to join room</h2>
+          <p className="text-slate-400 mb-6 text-sm">{error}</p>
+          <button onClick={() => router.push('/')} className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg">
+            Back to Home
+          </button>
+        </div>
       </div>
     );
   }
 
-  const positions = getCirclePositions(room.candidates.length);
+  if (!room) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-slate-400 text-sm">Connecting to room…</div>
+      </div>
+    );
+  }
+
+  const positions = getPositions(room.candidates.length);
+  const isActivePhase = phase === 'discussion' || phase === 'closing';
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: 'var(--bg-primary)' }}>
+    <div className="min-h-screen flex flex-col" style={{ background: '#0F172A' }}>
       {/* Top bar */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-white/5 bg-slate-900/50 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
-          <button onClick={() => router.push('/')} className="text-slate-400 hover:text-white text-sm">← Back</button>
-          <div className="w-px h-4 bg-slate-700" />
-          <div className="text-sm font-medium text-white truncate max-w-xs" title={room.topic}>
-            {room.topic}
-          </div>
-          <span className={`text-xs px-2 py-0.5 rounded-full capitalize font-medium ${
+      <header className="flex items-center justify-between px-4 py-3 border-b border-white/5 bg-slate-900/60 backdrop-blur-sm shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          <button onClick={() => router.push('/')} className="text-slate-400 hover:text-white text-sm shrink-0">← Back</button>
+          <div className="w-px h-4 bg-slate-700 shrink-0" />
+          <p className="text-sm font-medium text-white truncate">{room.topic}</p>
+          <span className={`text-xs px-2 py-0.5 rounded-full capitalize font-medium shrink-0 ${
             room.panelType === 'collaborative' ? 'bg-emerald-500/15 text-emerald-400' :
             room.panelType === 'competitive' ? 'bg-amber-500/15 text-amber-400' :
             room.panelType === 'hostile' ? 'bg-red-500/15 text-red-400' :
-            'bg-indigo-500/15 text-indigo-400'
-          }`}>
+            'bg-indigo-500/15 text-indigo-400'}`}>
             {room.panelType}
           </span>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           {phase === 'discussion' && (
-            <div className={`font-mono text-sm font-bold ${discussionRemaining < 60000 ? 'text-red-400' : 'text-indigo-400'}`}>
-              ⏱ {formatTime(discussionRemaining)}
-            </div>
+            <span className={`font-mono text-sm font-bold ${discRemaining < 60000 ? 'text-red-400 animate-pulse' : 'text-indigo-300'}`}>
+              ⏱ {fmtTime(discRemaining)}
+            </span>
           )}
-          <button
-            onClick={() => setShowTranscript((v) => !v)}
-            className="text-xs px-2.5 py-1.5 rounded-lg bg-slate-700 text-slate-300 hover:bg-slate-600 transition-colors"
-          >
+          <button onClick={() => setShowTranscript((v) => !v)}
+            className="text-xs px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors">
             {showTranscript ? 'Hide' : 'Show'} Transcript
           </button>
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Main arena */}
+      {error && (
+        <div className="bg-red-900/30 border-b border-red-500/20 px-4 py-2 text-sm text-red-300 text-center">
+          {error}
+          <button onClick={() => setError('')} className="ml-3 underline">dismiss</button>
+        </div>
+      )}
+
+      <div className="flex flex-1 overflow-hidden min-h-0">
+        {/* Arena */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Discussion circle */}
-          <div className="flex-1 relative p-4" style={{ minHeight: 380 }}>
-            <div className="relative w-full h-full" style={{ minHeight: 350 }}>
-              {/* Phase overlay */}
-              <div className="relative w-full h-full">
-                {/* Moderator */}
-                <div
-                  className="absolute transform -translate-x-1/2 -translate-y-1/2 z-10"
-                  style={{ left: `${positions[0].x}%`, top: `${positions[0].y}%` }}
-                >
-                  <CandidateAvatar
-                    name="Moderator"
-                    color="#6B7280"
-                    isSpeaking={speakingId === 'moderator'}
-                    isModerator
-                  />
-                </div>
+          <div className="flex-1 relative p-2" style={{ minHeight: 320 }}>
+            <div className="relative w-full h-full" style={{ minHeight: 300 }}>
 
-                {/* AI Candidates */}
-                {room.candidates.map((candidate, i) => (
-                  <div
-                    key={candidate.id}
-                    className="absolute transform -translate-x-1/2 -translate-y-1/2 z-10"
-                    style={{ left: `${positions[i + 1].x}%`, top: `${positions[i + 1].y}%` }}
-                  >
-                    <CandidateAvatar
-                      name={candidate.name}
-                      color={candidate.avatarColor}
-                      isSpeaking={speakingId === candidate.id}
-                      personality={candidate.personality}
-                      speakingCount={candidate.speakingCount}
-                    />
+              {/* Candidate avatars */}
+              {positions.slice(1, -1).map((pos, i) => {
+                const c = room.candidates[i];
+                if (!c) return null;
+                return (
+                  <div key={c.id} className="absolute z-10"
+                    style={{ left: `${pos.x}%`, top: `${pos.y}%`, transform: 'translate(-50%, -50%)' }}>
+                    <Avatar name={c.name} color={c.avatarColor} isSpeaking={speakingId === c.id}
+                      personality={c.personality} />
                   </div>
-                ))}
+                );
+              })}
 
-                {/* Human (you) */}
-                <div
-                  className="absolute transform -translate-x-1/2 -translate-y-1/2 z-10"
-                  style={{ left: `${positions[positions.length - 1].x}%`, top: `${positions[positions.length - 1].y}%` }}
-                >
-                  <CandidateAvatar
-                    name={humanName}
-                    color="#0E7490"
-                    isSpeaking={isHumanSpeaking}
-                    isHuman
-                  />
-                </div>
-
-                {/* Phase overlays */}
-                {(phase === 'lobby' || phase === 'generating-review') && (
-                  <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-20">
-                    {phase === 'lobby' ? (
-                      <>
-                        <div className="text-5xl mb-4">🎓</div>
-                        <h2 className="text-2xl font-bold text-white mb-2">Ready to begin?</h2>
-                        <p className="text-slate-400 mb-6 text-center max-w-xs text-sm">
-                          Your AI panel is assembled. Ensure your microphone is ready.
-                        </p>
-                        <button
-                          onClick={handleStartGame}
-                          className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold text-base transition-colors shadow-lg"
-                        >
-                          Start Discussion
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <div className="text-5xl mb-4 animate-pulse">⚙️</div>
-                        <h2 className="text-xl font-bold text-white mb-2">Generating Reviews</h2>
-                        <p className="text-slate-400 text-sm">AI panel is evaluating all participants...</p>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {phase === 'thinking' && (
-                  <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-20">
-                    <div className="text-5xl mb-4">🧠</div>
-                    <h2 className="text-xl font-bold text-white mb-1">Think Time</h2>
-                    <p className="text-slate-400 mb-4 text-sm">Organize your thoughts before speaking</p>
-                    <div className="text-6xl font-mono font-bold text-indigo-400 mb-6">
-                      {Math.floor(thinkSeconds / 60)}:{(thinkSeconds % 60).toString().padStart(2, '0')}
-                    </div>
-                    <div className="w-full max-w-sm">
-                      <textarea
-                        value={notes}
-                        onChange={(e) => setNotes(e.target.value)}
-                        placeholder="Jot down your key points here..."
-                        rows={4}
-                        className="w-full bg-slate-800/80 border border-slate-600 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-indigo-500 resize-none"
-                      />
-                    </div>
-                  </div>
-                )}
+              {/* Moderator */}
+              <div className="absolute z-10"
+                style={{ left: `${positions[0].x}%`, top: `${positions[0].y}%`, transform: 'translate(-50%, -50%)' }}>
+                <Avatar name="Moderator" color="#6B7280" isSpeaking={speakingId === 'moderator'} isModerator />
               </div>
+
+              {/* Human */}
+              <div className="absolute z-10"
+                style={{ left: `${positions[positions.length - 1].x}%`, top: `${positions[positions.length - 1].y}%`, transform: 'translate(-50%, -50%)' }}>
+                <Avatar name={humanName} color="#0E7490" isSpeaking={isHumanSpeaking} isHuman />
+              </div>
+
+              {/* Phase overlays */}
+              {phase === 'lobby' && (
+                <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-20 p-6">
+                  <div className="text-5xl mb-4">🎓</div>
+                  <h2 className="text-2xl font-bold text-white mb-2">Ready to begin?</h2>
+                  <p className="text-slate-400 mb-2 text-center text-sm max-w-xs">
+                    Your AI panel is assembled. Make sure your microphone is allowed in the browser.
+                  </p>
+                  <p className="text-slate-500 mb-6 text-center text-xs max-w-xs">
+                    {room.candidates.length} AI candidates · {Math.round(room.discussionDuration / 60000)} min discussion · {room.panelType} panel
+                  </p>
+                  <button onClick={handleStartGame}
+                    className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold text-base transition-colors shadow-lg shadow-indigo-500/25">
+                    Start Discussion
+                  </button>
+                </div>
+              )}
+
+              {phase === 'thinking' && (
+                <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-20 p-6">
+                  <div className="text-4xl mb-3">🧠</div>
+                  <h2 className="text-lg font-bold text-white mb-1">Think Time</h2>
+                  <p className="text-slate-400 text-sm mb-4">Organise your thoughts before the discussion</p>
+                  <div className="text-5xl font-mono font-bold text-indigo-400 mb-5">
+                    {Math.floor(thinkSecs / 60)}:{(thinkSecs % 60).toString().padStart(2, '0')}
+                  </div>
+                  <textarea value={notes} onChange={(e) => setNotes(e.target.value)}
+                    placeholder="Jot down key points, examples, counterarguments…"
+                    rows={4}
+                    className="w-full max-w-sm bg-slate-800/80 border border-slate-600 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-indigo-500 resize-none" />
+                </div>
+              )}
+
+              {phase === 'generating-review' && (
+                <div className="absolute inset-0 bg-slate-900/88 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-20">
+                  <div className="text-4xl mb-3 animate-spin">⚙️</div>
+                  <h2 className="text-lg font-bold text-white mb-1">Generating Evaluations</h2>
+                  <p className="text-slate-400 text-sm">AI panel is reviewing all participants…</p>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Status / Controls bar */}
-          <div className="border-t border-white/5 bg-slate-900/50 p-4">
-            {/* Status text */}
+          {/* Controls bar */}
+          <div className="border-t border-white/5 bg-slate-900/50 p-3 shrink-0">
             {statusText && (
-              <div className="text-center text-sm text-slate-400 mb-3 animate-pulse">
-                {statusText}
-              </div>
+              <p className="text-center text-xs text-slate-400 mb-2 animate-pulse truncate">{statusText}</p>
             )}
-
-            {/* Human opportunity indicator */}
-            {humanOpportunity && !pttActive && phase === 'discussion' && (
-              <div className="text-center text-sm text-cyan-400 mb-3 animate-pulse font-medium">
-                💬 Your turn to speak — press and hold the button below
-              </div>
+            {humanOpportunity && !pttActive && isActivePhase && (
+              <p className="text-center text-xs text-cyan-400 mb-2 font-medium animate-pulse">
+                💬 Your turn to speak
+              </p>
             )}
-
-            {/* Human closing mode */}
             {humanClosingMode && (
-              <div className="text-center text-sm text-indigo-400 mb-3 font-medium">
-                🎤 Please give your closing statement
-              </div>
+              <p className="text-center text-xs text-indigo-300 mb-2 font-medium">
+                🎤 Give your closing statement
+              </p>
             )}
 
-            {/* PTT or Text input */}
-            {(phase === 'discussion' || phase === 'closing' || humanClosingMode) && (
-              <div className="flex items-center justify-center gap-4">
-                {speechSupported ? (
+            {isActivePhase && (
+              speechSupported ? (
+                <div className="flex justify-center">
                   <button
-                    className={`ptt-button px-8 py-3 rounded-xl font-semibold text-sm transition-all select-none ${
-                      pttActive
-                        ? 'bg-red-500 text-white shadow-lg shadow-red-500/30 scale-95'
-                        : humanOpportunity || humanClosingMode
-                        ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30 animate-pulse'
-                        : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                    }`}
-                    onMouseDown={startPTT}
-                    onMouseUp={stopPTT}
+                    className={`ptt-button px-8 py-3 rounded-xl font-semibold text-sm transition-all select-none touch-none ${
+                      pttActive ? 'bg-red-500 text-white shadow-red-500/30 shadow-lg scale-95' :
+                      (humanOpportunity || humanClosingMode) ? 'bg-indigo-600 text-white shadow-indigo-500/30 shadow-lg animate-pulse' :
+                      'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}
+                    onMouseDown={startPTT} onMouseUp={stopPTT}
                     onTouchStart={(e) => { e.preventDefault(); startPTT(); }}
                     onTouchEnd={(e) => { e.preventDefault(); stopPTT(); }}
                   >
-                    {pttActive ? '🔴 Recording... (release to send)' : '🎤 Hold to Speak'}
+                    {pttActive ? '🔴 Recording… (release to send)' : '🎤 Hold to Speak'}
                   </button>
-                ) : (
-                  <div className="flex gap-2 w-full max-w-md">
-                    <input
-                      type="text"
-                      value={textInput}
-                      onChange={(e) => setTextInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && submitTextInput()}
-                      placeholder="Type your contribution and press Enter..."
-                      className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 text-sm"
-                    />
-                    <button
-                      onClick={submitTextInput}
-                      className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors"
-                    >
-                      Send
-                    </button>
-                  </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                <div className="flex gap-2 max-w-md mx-auto">
+                  <input type="text" value={textInput} onChange={(e) => setTextInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && submitText()}
+                    placeholder="Type your contribution and press Enter…"
+                    className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white placeholder-slate-500 text-sm focus:outline-none focus:border-indigo-500" />
+                  <button onClick={submitText}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors">
+                    Send
+                  </button>
+                </div>
+              )
             )}
 
             {phase === 'thinking' && (
-              <div className="text-center text-slate-500 text-sm">
-                Discussion begins after think time ends
-              </div>
+              <p className="text-center text-xs text-slate-500">Discussion begins after think time ends</p>
             )}
-
-            {phase === 'intro' && (
-              <div className="text-center flex items-center justify-center gap-2">
-                <ThinkingDots />
-                <span className="text-slate-400 text-sm ml-2">Moderator is introducing the topic...</span>
+            {(phase === 'intro') && (
+              <div className="flex items-center justify-center gap-2">
+                <ThinkDots />
+                <span className="text-xs text-slate-500 ml-1">Moderator is speaking…</span>
               </div>
             )}
           </div>
         </div>
 
-        {/* Transcript sidebar */}
+        {/* Transcript */}
         {showTranscript && (
-          <div className="w-72 border-l border-white/5 bg-slate-900/30 flex flex-col">
-            <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-              <span className="text-sm font-semibold text-slate-300">Transcript</span>
-              <span className="text-xs text-slate-500">{messages.length} messages</span>
+          <div className="w-64 border-l border-white/5 bg-slate-900/30 flex flex-col shrink-0">
+            <div className="px-3 py-2.5 border-b border-white/5 flex items-center justify-between shrink-0">
+              <span className="text-xs font-semibold text-slate-300">Live Transcript</span>
+              <span className="text-xs text-slate-600">{messages.length}</span>
             </div>
-            <div
-              ref={transcriptRef}
-              className="flex-1 overflow-y-auto p-3 space-y-3 transcript-scroll"
-            >
+            <div ref={transcriptRef} className="flex-1 overflow-y-auto p-2 space-y-2 transcript-scroll min-h-0">
               {messages.map((msg) => (
-                <div key={msg.id} className={`text-xs rounded-lg p-2.5 ${
-                  msg.isModerator
-                    ? 'bg-slate-700/50 border border-slate-600/30'
-                    : msg.isHuman
-                    ? 'bg-cyan-900/30 border border-cyan-700/20 ml-2'
-                    : 'bg-slate-800/50'
-                }`}>
-                  <div className={`font-semibold mb-1 ${
-                    msg.isModerator ? 'text-slate-300' : msg.isHuman ? 'text-cyan-400' : 'text-indigo-300'
-                  }`}>
+                <div key={msg.id} className={`text-xs rounded-lg p-2 ${
+                  msg.isModerator ? 'bg-slate-700/50 border border-slate-600/20' :
+                  msg.isHuman ? 'bg-cyan-900/30 border border-cyan-700/20' : 'bg-slate-800/60'}`}>
+                  <div className={`font-semibold mb-0.5 flex items-center gap-1 ${
+                    msg.isModerator ? 'text-slate-300' : msg.isHuman ? 'text-cyan-400' : 'text-indigo-300'}`}>
                     {msg.speakerName}
                     {speakingId === msg.speakerId && !msg.isHuman && (
-                      <span className="ml-1 text-emerald-400">●</span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
                     )}
                   </div>
                   <div className="text-slate-300 leading-relaxed">{msg.text}</div>
                 </div>
               ))}
               {messages.length === 0 && (
-                <div className="text-slate-600 text-xs text-center pt-4">
-                  Discussion transcript will appear here
-                </div>
+                <p className="text-slate-600 text-xs text-center pt-6">Transcript appears here</p>
               )}
             </div>
           </div>
