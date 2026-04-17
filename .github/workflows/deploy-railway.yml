@@ -1,0 +1,27 @@
+name: Deploy to Railway
+
+on:
+  push:
+    branches:
+      - claude/mba-group-discussion-game-zCQZg
+      - main
+    paths:
+      - 'gd-game/**'
+      - 'railway.json'
+      - '.github/workflows/deploy-railway.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        working-directory: ./gd-game
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --detach

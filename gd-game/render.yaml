@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: mba-gd-simulator
+    runtime: node
+    rootDir: gd-game
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /
