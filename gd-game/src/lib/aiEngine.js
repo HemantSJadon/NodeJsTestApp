@@ -9,17 +9,17 @@ const PANEL_CONTEXT = {
 
 const PERSONALITY_STYLE = {
   assertive:
-    'You are assertive and self-assured. You speak first, use phrases like "I\'d like to anchor the discussion with—", "My position is clear:", take initiative. Short, punchy, direct sentences. Leadership in tone.',
+    'Direct and confident. Takes positions firmly and defends them. Short punchy sentences. Pushes back when others are vague. Does not hedge.',
   analytical:
-    'You are analytical. You bring structure: "There are three dimensions here—", cite macro data or case examples, reference frameworks (Porter\'s Five Forces, SWOT, policy benchmarks). Methodical, credible, fact-grounded.',
+    'Structured thinker. Breaks problems into components, references data or real-world examples naturally. Credible and precise — but not robotic.',
   collaborative:
-    'You are a natural bridge-builder. You frequently reference others: "Building on Arjun\'s point—", "I agree with the framework Priya outlined, but want to add—". Empathetic, inclusive, consensus-seeking.',
+    'Warm and inclusive. Genuinely acknowledges others\' points before adding their own angle. Seeks synthesis rather than winning.',
   devil_advocate:
-    'You play devil\'s advocate. You probe and challenge: "But have we stress-tested that assumption?", "The data actually shows the opposite trend in—", "I\'d push back—". Respectful but persistently questioning.',
+    'Naturally skeptical. Probes assumptions and surfaces what others overlook. Respectful but relentlessly questioning — never accepts the consensus without challenge.',
   quiet:
-    'You are the thoughtful, economical speaker. Long silences, then impactful contribution: "I\'ve been listening carefully, and one dimension missing from this discussion is—". Few but high-value contributions. Never rambles.',
+    'Economical with words. Listens more than speaks. When they do contribute, it lands — a specific observation or angle that reframes the discussion.',
   verbose:
-    'You are enthusiastic and expressive — a natural storyteller. You use vivid analogies, real-world anecdotes ("I recall reading that—"), and sometimes go slightly off on a tangent before returning to the point. Engaging but slightly long.',
+    'Enthusiastic storyteller. Uses vivid analogies and real examples. Sometimes goes slightly off on a tangent before returning to the point. Engaging and warm.',
 };
 
 const INDIAN_MBA_CONTEXT = `This is an MBA group discussion for top Indian B-schools (IIM A/B/C/L/K, ISB, XLRI, FMS, MDI).
@@ -108,35 +108,42 @@ Respond with SKIP ~65% of the time unless nudging the human is needed.`;
   // ─── Candidate utterances ─────────────────────────────────────────────────
 
   async generateCandidateUtterance(room, candidate) {
-    const recent = room.messages.slice(-10).map((m) => `${m.speakerName}: ${m.text}`).join('\n');
-    const lastMsg = room.messages.filter((m) => !m.isModerator).slice(-1)[0];
+    const recent = room.messages.slice(-15).map((m) => `${m.speakerName}: ${m.text}`).join('\n');
+    const lastMsg = room.messages.slice(-1)[0];
+    const humanJustSpoke = lastMsg?.isHuman && !lastMsg?.isModerator;
+
+    const reactInstruction = humanJustSpoke
+      ? `IMPORTANT: ${lastMsg.speakerName} just spoke. Directly address their point before anything else.`
+      : lastMsg
+        ? `React specifically to what ${lastMsg.speakerName} just said.`
+        : 'Open the discussion with your initial take.';
 
     const prompt = `${INDIAN_MBA_CONTEXT}
 
-You are ${candidate.name}, an MBA candidate in a group discussion.
+You are ${candidate.name} in a live group discussion. You hear each message only as it is spoken — you have no advance knowledge of what anyone will say next.
+
 Background: ${candidate.background}
-Your private stance on the topic: ${candidate.stance || 'analytical and balanced'}
-Personality style: ${PERSONALITY_STYLE[candidate.personality] || 'thoughtful and engaged'}
+Your private stance on this topic: ${candidate.stance || 'analytical and balanced'}
+Your natural speaking style: ${PERSONALITY_STYLE[candidate.personality] || 'thoughtful and engaged'}
 
 ${PANEL_CONTEXT[room.panelType]}
 
-Discussion topic: "${room.topic}"
+Topic: "${room.topic}"
 
-Conversation so far:
+Discussion so far (most recent last):
 ${recent || '(Discussion just beginning.)'}
 
-${lastMsg ? `Last speaker: ${lastMsg.speakerName}` : ''}
+${reactInstruction}
 
-YOUR TURN. Generate ONE natural spoken contribution (2–4 sentences, 40–70 words).
+YOUR TURN. Speak naturally — 25–50 words maximum.
 RULES:
-- React to what was just said if it's relevant to your stance
-- Introduce a genuinely NEW sub-point, angle, or challenge — never repeat what's already been said
-- Stay tightly on the topic
-- Express your personality through word choice and rhythm
-- Do NOT prefix with your own name, quotes, or meta-phrases like "I would like to say"
-- Write as if speaking aloud — contractions, natural rhythm, no overly formal language
+- Sound like you're thinking out loud, not reading from notes
+- Contractions and natural rhythm ("I think", "honestly", "wait—", "actually")
+- Introduce ONE specific reaction or new point — never summarise the whole debate
+- Do NOT start with your own name or meta-phrases like "I would like to say"
+- Write ONLY the words you speak aloud
 
-Respond with ONLY the words ${candidate.name} speaks:`;
+Respond with ONLY ${candidate.name}'s spoken words:`;
 
     return this._callAPI(prompt, 150);
   }

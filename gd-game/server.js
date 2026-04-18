@@ -145,6 +145,17 @@ app.prepare().then(() => {
       }
     });
 
+    socket.on('skip-thinking', ({ roomId } = {}) => {
+      try {
+        if (!roomId) return;
+        const room = gameManager.getRoom(roomId);
+        if (!room || room.phase !== 'thinking') return;
+        gameManager.skipThinking(roomId);
+      } catch (err) {
+        console.error('skip-thinking error:', err);
+      }
+    });
+
     // Client signals TTS playback is complete — this drives server timing
     socket.on('utterance-complete', ({ messageId } = {}) => {
       try {

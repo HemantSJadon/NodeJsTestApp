@@ -131,7 +131,7 @@ export default function RoomPage() {
   const [statusText, setStatusText] = useState('');
   const [notes, setNotes] = useState('');
   const [textInput, setTextInput] = useState('');
-  const [showTranscript, setShowTranscript] = useState(true);
+  const [showTranscript, setShowTranscript] = useState(false);
   const [error, setError] = useState('');
 
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -174,7 +174,7 @@ export default function RoomPage() {
   }, []);
 
   // Speak text and signal server when done
-  const speakText = useCallback((text: string, voiceIndex: number, messageId: string) => {
+  const speakText = useCallback((text: string, voiceIndex: number, messageId: string, voiceGender?: string) => {
     const synth = synthRef.current;
     if (!synth) {
       getSocket().emit('utterance-complete', { messageId });
@@ -184,11 +184,21 @@ export default function RoomPage() {
 
     const utt = new SpeechSynthesisUtterance(text);
     const voices = voicesRef.current;
+
     if (voices.length > 0) {
-      utt.voice = voices[voiceIndex % voices.length];
+      // Try to find a gender-matched voice
+      const femaleKeywords = ['female', 'woman', 'zira', 'samantha', 'karen', 'victoria', 'tessa', 'fiona', 'moira'];
+      const maleKeywords = ['male', 'man', 'david', 'daniel', 'alex', 'mark', 'fred', 'tom', 'rishi'];
+      const keywords = voiceGender === 'female' ? femaleKeywords : maleKeywords;
+      const genderMatch = voices.find((v) => keywords.some((k) => v.name.toLowerCase().includes(k)));
+      utt.voice = genderMatch ?? voices[voiceIndex % voices.length];
     }
-    utt.rate = 0.88 + (voiceIndex % 4) * 0.03;
-    utt.pitch = 0.9 + (voiceIndex % 3) * 0.12;
+
+    // Wide pitch/rate ranges so even a single voice engine sounds distinct per speaker
+    const pitchSteps  = [0.70, 0.85, 1.00, 1.15, 1.30, 0.78, 0.92, 1.08, 1.22, 0.75];
+    const rateSteps   = [0.82, 0.88, 0.94, 1.00, 0.80, 0.92, 0.86, 0.96, 0.84, 0.90];
+    utt.pitch = pitchSteps[voiceIndex % pitchSteps.length];
+    utt.rate  = rateSteps[voiceIndex % rateSteps.length];
 
     const done = () => {
       if (currentMsgIdRef.current === messageId) {
@@ -266,13 +276,13 @@ export default function RoomPage() {
       }
     });
 
-    s.on('ai-speaking', ({ speakerId, speakerName, text, voiceIndex, messageId }: {
+    s.on('ai-speaking', ({ speakerId, speakerName, text, voiceIndex, voiceGender, messageId }: {
       speakerId: string; speakerName: string; text: string;
-      voiceIndex: number; messageId: string; isModerator?: boolean;
+      voiceIndex: number; voiceGender?: string; messageId: string; isModerator?: boolean;
     }) => {
       setSpeakingId(speakerId);
       setStatusText(`${speakerName} is speaking…`);
-      speakText(text, voiceIndex, messageId);
+      speakText(text, voiceIndex, messageId, voiceGender);
     });
 
     s.on('message-added', (msg: Message) => {
@@ -435,12 +445,12 @@ export default function RoomPage() {
   return (
     <div className="min-h-screen flex flex-col" style={{ background: '#0F172A' }}>
       {/* Top bar */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-white/5 bg-slate-900/60 backdrop-blur-sm shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="flex items-center justify-between px-3 py-2.5 border-b border-white/5 bg-slate-900/60 backdrop-blur-sm shrink-0 gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <button onClick={() => router.push('/')} className="text-slate-400 hover:text-white text-sm shrink-0">← Back</button>
           <div className="w-px h-4 bg-slate-700 shrink-0" />
-          <p className="text-sm font-medium text-white truncate">{room.topic}</p>
-          <span className={`text-xs px-2 py-0.5 rounded-full capitalize font-medium shrink-0 ${
+          <p className="text-xs md:text-sm font-medium text-white truncate">{room.topic}</p>
+          <span className={`text-[10px] md:text-xs px-1.5 py-0.5 rounded-full capitalize font-medium shrink-0 ${
             room.panelType === 'collaborative' ? 'bg-emerald-500/15 text-emerald-400' :
             room.panelType === 'competitive' ? 'bg-amber-500/15 text-amber-400' :
             room.panelType === 'hostile' ? 'bg-red-500/15 text-red-400' :
@@ -448,15 +458,20 @@ export default function RoomPage() {
             {room.panelType}
           </span>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           {phase === 'discussion' && (
-            <span className={`font-mono text-sm font-bold ${discRemaining < 60000 ? 'text-red-400 animate-pulse' : 'text-indigo-300'}`}>
+            <span className={`font-mono text-xs md:text-sm font-bold ${discRemaining < 60000 ? 'text-red-400 animate-pulse' : 'text-indigo-300'}`}>
               ⏱ {fmtTime(discRemaining)}
             </span>
           )}
           <button onClick={() => setShowTranscript((v) => !v)}
-            className="text-xs px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors">
-            {showTranscript ? 'Hide' : 'Show'} Transcript
+            className="relative text-xs px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors">
+            {showTranscript ? 'Hide' : 'Transcript'}
+            {!showTranscript && messages.length > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 bg-indigo-500 text-white text-[9px] rounded-full flex items-center justify-center font-bold">
+                {messages.length > 99 ? '9+' : messages.length}
+              </span>
+            )}
           </button>
         </div>
       </header>
@@ -468,11 +483,12 @@ export default function RoomPage() {
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden min-h-0">
-        {/* Arena */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <div className="flex-1 relative p-2" style={{ minHeight: 320 }}>
-            <div className="relative w-full h-full" style={{ minHeight: 300 }}>
+      <div className="flex flex-col md:flex-row flex-1 overflow-hidden min-h-0">
+        {/* Arena — full width on mobile, flex-1 on desktop */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          {/* Avatar canvas: padding-bottom trick gives stable height on all screen sizes */}
+          <div className="relative flex-1" style={{ minHeight: 260 }}>
+            <div className="absolute inset-0 p-2">
 
               {/* Candidate avatars */}
               {positions.slice(1, -1).map((pos, i) => {
@@ -518,17 +534,26 @@ export default function RoomPage() {
               )}
 
               {phase === 'thinking' && (
-                <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center z-20 p-6">
-                  <div className="text-4xl mb-3">🧠</div>
-                  <h2 className="text-lg font-bold text-white mb-1">Think Time</h2>
-                  <p className="text-slate-400 text-sm mb-4">Organise your thoughts before the discussion</p>
-                  <div className="text-5xl font-mono font-bold text-indigo-400 mb-5">
-                    {Math.floor(thinkSecs / 60)}:{(thinkSecs % 60).toString().padStart(2, '0')}
+                <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-sm rounded-2xl flex items-start md:items-center justify-center z-20 overflow-y-auto py-4">
+                  <div className="w-full max-w-sm mx-4 bg-slate-800/90 border border-slate-700/50 rounded-2xl p-5">
+                    <div className="text-center mb-3">
+                      <div className="text-3xl mb-1">🧠</div>
+                      <h2 className="text-base font-bold text-white">Think Time</h2>
+                      <p className="text-slate-400 text-xs mt-0.5">Organise your thoughts before the discussion</p>
+                    </div>
+                    <div className="text-4xl font-mono font-bold text-indigo-400 text-center mb-4">
+                      {Math.floor(thinkSecs / 60)}:{(thinkSecs % 60).toString().padStart(2, '0')}
+                    </div>
+                    <textarea value={notes} onChange={(e) => setNotes(e.target.value)}
+                      placeholder="Jot down key points, examples, counterarguments…"
+                      rows={4}
+                      className="w-full bg-slate-900/80 border border-slate-600 rounded-xl px-3 py-2.5 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-indigo-500 resize-none" />
+                    <button
+                      onClick={() => getSocket().emit('skip-thinking', { roomId })}
+                      className="mt-3 w-full text-xs text-slate-500 hover:text-slate-300 underline transition-colors text-center">
+                      Skip think time →
+                    </button>
                   </div>
-                  <textarea value={notes} onChange={(e) => setNotes(e.target.value)}
-                    placeholder="Jot down key points, examples, counterarguments…"
-                    rows={4}
-                    className="w-full max-w-sm bg-slate-800/80 border border-slate-600 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-500 text-sm focus:outline-none focus:border-indigo-500 resize-none" />
                 </div>
               )}
 
@@ -588,7 +613,7 @@ export default function RoomPage() {
             )}
 
             {phase === 'thinking' && (
-              <p className="text-center text-xs text-slate-500">Discussion begins after think time ends</p>
+              <p className="text-center text-xs text-slate-500">Use the panel above to jot notes</p>
             )}
             {(phase === 'intro') && (
               <div className="flex items-center justify-center gap-2">
@@ -599,12 +624,16 @@ export default function RoomPage() {
           </div>
         </div>
 
-        {/* Transcript */}
+        {/* Transcript — fixed overlay on mobile, side panel on desktop */}
         {showTranscript && (
-          <div className="w-64 border-l border-white/5 bg-slate-900/30 flex flex-col shrink-0">
+          <div className="fixed inset-x-0 bottom-0 top-12 z-50 md:relative md:inset-auto md:top-auto md:z-auto md:w-72 border-l border-white/5 bg-slate-900 md:bg-slate-900/30 flex flex-col shrink-0">
             <div className="px-3 py-2.5 border-b border-white/5 flex items-center justify-between shrink-0">
               <span className="text-xs font-semibold text-slate-300">Live Transcript</span>
-              <span className="text-xs text-slate-600">{messages.length}</span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-slate-600">{messages.length} messages</span>
+                <button onClick={() => setShowTranscript(false)}
+                  className="text-slate-500 hover:text-white text-lg leading-none md:hidden">×</button>
+              </div>
             </div>
             <div ref={transcriptRef} className="flex-1 overflow-y-auto p-2 space-y-2 transcript-scroll min-h-0">
               {messages.map((msg) => (

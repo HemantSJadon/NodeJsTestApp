@@ -60,6 +60,7 @@ export class GameManager {
       humanName: 'You',
       humanPaused: false,
       humanWaiting: false,
+      skipThinking: false,
       reviews: null,
       started: false,
       // Per-candidate metrics for accurate review generation
@@ -118,6 +119,11 @@ export class GameManager {
   humanClosingDone(roomId) {
     const r = this.rooms.get(roomId);
     if (r) r.humanWaiting = false;
+  }
+
+  skipThinking(roomId) {
+    const r = this.rooms.get(roomId);
+    if (r) r.skipThinking = true;
   }
 
   // ─── Client-driven TTS timing ──────────────────────────────────────────────
@@ -203,7 +209,7 @@ export class GameManager {
           this.aiEngine.generateClosingStatement(room, candidate)
         );
         const msg = this._addCandidateMsg(room, candidate, text);
-        await this._emitAndWait(emit, room, candidate.id, msg, candidate.voiceIndex, loopState);
+        await this._emitAndWait(emit, room, candidate.id, msg, candidate.voiceIndex, loopState, candidate.voiceGender);
         await this._interruptibleSleep(400, room, loopState);
       }
 
@@ -256,14 +262,8 @@ export class GameManager {
     let turnCount = 0;
     let warnedAtEnd = false;
 
-    // Pre-generate first AI utterance immediately
-    let nextSpeaker = this._selectNextSpeaker(room, turnCount);
-    let nextGenPromise = this._withRetry(() =>
-      this.aiEngine.generateCandidateUtterance(room, nextSpeaker)
-    );
-
     while (Date.now() < endTime && loopState.running) {
-      // Pause if human is speaking
+      // Wait if human is speaking
       while (room.humanPaused && loopState.running) {
         await this._sleep(200);
       }
@@ -277,7 +277,6 @@ export class GameManager {
         const warnText = `We have under a minute remaining. Please begin to wrap up.`;
         const warnMsg = this._addModMsg(room, warnText);
         await this._emitAndWait(emit, room, 'moderator', warnMsg, 0, loopState);
-        // Don't break — let remaining time play out for human to respond
       }
 
       if (remaining <= 0) break;
@@ -304,38 +303,30 @@ export class GameManager {
         }
       }
 
-      // ── Get the pre-generated utterance ──
-      const currentSpeaker = nextSpeaker;
+      // ── Select speaker AFTER any human input has landed in room.messages ──
+      const speaker = this._selectNextSpeaker(room, turnCount);
+
+      // ── Generate utterance NOW — sees every message including latest human speech ──
       let text;
       try {
-        text = await nextGenPromise;
-      } catch (err) {
-        console.error('Pre-gen failed, skipping turn:', err.message);
-        // Advance to next speaker and re-pre-generate
-        turnCount++;
-        nextSpeaker = this._selectNextSpeaker(room, turnCount);
-        nextGenPromise = this._withRetry(() =>
-          this.aiEngine.generateCandidateUtterance(room, nextSpeaker)
+        text = await this._withRetry(() =>
+          this.aiEngine.generateCandidateUtterance(room, speaker)
         );
-        await this._sleep(1000);
+      } catch (err) {
+        console.error('Generation failed, skipping turn:', err.message);
+        await this._sleep(1500);
         continue;
       }
 
-      // ── Add message to room history FIRST (so next speaker selection sees it) ──
-      const msg = this._addCandidateMsg(room, currentSpeaker, text);
-
-      // ── Immediately start generating the NEXT utterance in background ──
+      const msg = this._addCandidateMsg(room, speaker, text);
       turnCount++;
       room.metrics.totalTurns++;
-      nextSpeaker = this._selectNextSpeaker(room, turnCount);
-      nextGenPromise = this._withRetry(() =>
-        this.aiEngine.generateCandidateUtterance(room, nextSpeaker)
-      );
-      await this._emitAndWait(emit, room, currentSpeaker.id, msg, currentSpeaker.voiceIndex, loopState);
+
+      await this._emitAndWait(emit, room, speaker.id, msg, speaker.voiceIndex, loopState, speaker.voiceGender);
       if (!loopState.running) return;
 
-      // ── Natural pause between turns ──
-      const pauseMs = 700 + Math.random() * 1200;
+      // ── Brief natural pause (generation latency already acts as a thinking pause) ──
+      const pauseMs = 400 + Math.random() * 700;
       await this._interruptibleSleep(pauseMs, room, loopState);
 
       // ── Periodic human opportunity (every 2-3 AI turns) ──
@@ -429,7 +420,7 @@ export class GameManager {
 
   // ─── Emit + wait for client TTS completion ─────────────────────────────────
 
-  async _emitAndWait(emit, room, speakerId, msg, voiceIndex, loopState) {
+  async _emitAndWait(emit, room, speakerId, msg, voiceIndex, loopState, voiceGender) {
     const isModerator = msg.isModerator;
     const estimatedMs = this._estimateSpeechMs(msg.text);
 
@@ -439,6 +430,7 @@ export class GameManager {
       text: msg.text,
       isModerator,
       voiceIndex,
+      voiceGender: voiceGender ?? null,
       messageId: msg.id,
     });
     emit('message-added', msg);
@@ -464,11 +456,12 @@ export class GameManager {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // Interruptible sleep: cancels cleanly when loop stops or human pauses
+  // Interruptible sleep: cancels cleanly when loop stops or skip flag is set
   async _interruptibleSleep(ms, room, loopState) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
-      if (!loopState.running) return;
+      if (loopState && !loopState.running) return;
+      if (room && room.skipThinking) return;
       await this._sleep(Math.min(100, end - Date.now()));
     }
   }
